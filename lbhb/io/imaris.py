@@ -53,32 +53,30 @@ def parse_filename(filename):
     }
 
 
-def get_image_extents(filename):
-    with tb.open_file(filename) as fh:
+def get_image_extents(fh):
+    def extract_value(attrs, key):
+        return float(''.join(attrs[key].astype('U')))
 
-        def extract_value(attrs, key):
-            return float(''.join(attrs[key].astype('U')))
+    image_attrs = fh.root.DataSetInfo.Image._v_attrs
 
-        image_attrs = fh.root.DataSetInfo.Image._v_attrs
+    xlb = extract_value(image_attrs, 'ExtMin0')
+    ylb = extract_value(image_attrs, 'ExtMin1')
+    zlb = extract_value(image_attrs, 'ExtMin2')
+    xub = extract_value(image_attrs, 'ExtMax0')
+    yub = extract_value(image_attrs, 'ExtMax1')
+    zub = extract_value(image_attrs, 'ExtMax2')
 
-        xlb = extract_value(image_attrs, 'ExtMin0')
-        ylb = extract_value(image_attrs, 'ExtMin1')
-        zlb = extract_value(image_attrs, 'ExtMin2')
-        xub = extract_value(image_attrs, 'ExtMax0')
-        yub = extract_value(image_attrs, 'ExtMax1')
-        zub = extract_value(image_attrs, 'ExtMax2')
-
-        return {
-            'x_start': xlb,
-            'y_start': ylb,
-            'z_start': zlb,
-            'x_end': xub,
-            'y_end': yub,
-            'z_end': zub,
-            'x_span': xub-xlb,
-            'y_span': yub-ylb,
-            'z_span': zub-zlb,
-        }
+    return {
+        'x_start': xlb,
+        'y_start': ylb,
+        'z_start': zlb,
+        'x_end': xub,
+        'y_end': yub,
+        'z_end': zub,
+        'x_span': xub-xlb,
+        'y_span': yub-ylb,
+        'z_span': zub-zlb,
+    }
 
 
 def get_name(node):
