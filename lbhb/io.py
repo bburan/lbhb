@@ -35,7 +35,8 @@ def load_animal_info():
 
     def load_google_sheet(key, sheet_id):
         url_template = 'https://docs.google.com/spreadsheets/d/{key}/export' \
-            '?gid={sheet_id}&format=csv'
+            '?&format=csv'
+            #'?gid={sheet_id}&format=csv'
         url = url_template.format(key=key, sheet_id=sheet_id)
         return pd.read_csv(url, parse_dates=['exposure date', 'DOB'])
 
@@ -45,6 +46,8 @@ def load_animal_info():
         'exposure date': 'exposure_date',
         'exposure level': 'exposure_level',
         'S': 'sex',
+        'exclude R': 'exclude_right',
+        'exclude L': 'exclude_left',
     }
 
     key = '1NtpLAA9xcJSgHmUCys0dZc4lQcy_7_mICgQ2Rt_MqYA'
@@ -53,6 +56,9 @@ def load_animal_info():
     sheet['animal'] = sheet.apply(lambda x: '{} {}'.format(x['group'], x['marker']), axis=1)
     sheet['exposure date'] = sheet['exposure date'].map(lambda x: x.date())
     sheet['DOB'] = sheet['DOB'].map(lambda x: x.date())
+
+    sheet['exclude R'] = sheet['exclude R'].map({np.nan: False, 'Y': True})
+    sheet['exclude L'] = sheet['exclude L'].map({np.nan: False, 'Y': True})
     sheet.rename(columns=column_names, inplace=True)
     return sheet.loc[:, column_names.values()]
 
