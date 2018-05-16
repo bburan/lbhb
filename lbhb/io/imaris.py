@@ -65,6 +65,9 @@ def get_image_extents(fh):
     xub = extract_value(image_attrs, 'ExtMax0')
     yub = extract_value(image_attrs, 'ExtMax1')
     zub = extract_value(image_attrs, 'ExtMax2')
+    xvoxels = extract_value(image_attrs, 'X')
+    yvoxels = extract_value(image_attrs, 'Y')
+    zvoxels = extract_value(image_attrs, 'Z')
 
     return {
         'x_start': xlb,
@@ -76,6 +79,9 @@ def get_image_extents(fh):
         'x_span': xub-xlb,
         'y_span': yub-ylb,
         'z_span': zub-zlb,
+        'x_voxels': int(xvoxels),
+        'y_voxels': int(yvoxels),
+        'z_voxels': int(zvoxels),
     }
 
 
