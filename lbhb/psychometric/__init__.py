@@ -3,8 +3,6 @@ from scipy.stats import norm
 import pandas as pd
 import pylab as pl
 
-import pymc3 as mc
-
 
 def _get_trace_values(trace, effect):
     a = trace.get_values('α {}'.format(effect))
