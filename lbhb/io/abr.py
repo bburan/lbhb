@@ -58,6 +58,12 @@ def fix_epoch_size(table):
         table.addcol(data, 'epoch_size')
 
 
+def expand_column_names(columns, base_name):
+    if base_name is not None:
+        columns = ['{}{}'.format(base_name, c) for c in columns]
+    return columns
+
+
 def make_query(trials, base_name='target_tone_'):
     if base_name is not None:
         trials = trials.copy()
@@ -80,9 +86,9 @@ def format_columns(columns, base_name):
 
 class ABRFile:
 
-    def __init__(self, base_folder):
+    def __init__(self, base_folder, eeg_name='eeg'):
         self._base_folder = base_folder
-        self._eeg_folder = os.path.join(base_folder, 'eeg')
+        self._eeg_folder = os.path.join(base_folder, eeg_name)
         self._erp_folder = os.path.join(base_folder, 'erp')
         self._erp_md_folder = os.path.join(base_folder, 'erp_metadata')
         self._eeg = bcolz.carray(rootdir=self._eeg_folder)
@@ -157,7 +163,7 @@ class ABRFile:
         return df
 
     def get_epochs_filtered(self, filter_lb=300, filter_ub=3000,
-                            filter_order=1, offset=-1e3, duration=10e-3,
+                            filter_order=1, offset=-1e-3, duration=10e-3,
                             detrend='linear', pad_duration=10e-3,
                             base_name='target_tone_', columns=None, **trials):
 
@@ -172,8 +178,8 @@ class ABRFile:
         columns = df.columns[padding_samples:-padding_samples]
         return pd.DataFrame(epochs_filtered, index=df.index, columns=columns)
 
-    def get_epoch_groups(self, *columns):
-        groups = self.count_epochs(*columns)
+    def get_epoch_groups(self, *columns, base_name='target_tone_'):
+        groups = self.count_epochs(*columns, base_name=base_name)
         results = []
         keys = []
         for index, _ in groups.iteritems():
@@ -183,6 +189,10 @@ class ABRFile:
             results.append(epochs)
         index = pd.MultiIndex.from_tuples(keys, names=columns)
         return pd.Series(results, index=index, name='epochs')
+
+    def count_epochs(self, *columns, base_name='target_tone_'):
+        columns = expand_column_names(columns, base_name)
+        return self.trial_log.groupby(columns).size()
 
     @property
     def fs(self):
