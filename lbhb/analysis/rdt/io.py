@@ -180,7 +180,8 @@ def reformat_RDT_recording(recording):
     # Find out the targets
 
     x = target_id.as_continuous()[0]
-    targets = np.unique(x[x != 0])
+    m = np.isfinite(x) & (x != 0)
+    targets = np.unique(x[m])
 
     # Tag the epochs as target and whether it's current or not.
     for i, target in enumerate(targets):
@@ -230,6 +231,9 @@ def reformat_RDT_recording(recording):
     target_map[0] = 0
     x = target_id.as_continuous()
     x_mapped = np.vectorize(target_map.get, otypes=[np.float])(x)
+    m = ~np.isfinite(x_mapped)
+    x_mapped[m] = 0
+    x_mapped = x_mapped.astype('i')
 
     recording['target_id_map'] = target_id._modified_copy(x_mapped)
     recording['target_id_map'].meta = {'target_map': target_map}

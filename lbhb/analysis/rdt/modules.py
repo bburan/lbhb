@@ -17,6 +17,7 @@ def merge_streams(rec, gain):
     is_repeating = rec['repeating'].as_continuous()[0]
     is_ds = rec['dual_stream'].as_continuous()[0].astype('i')
     t_map = rec['target_id_map'].as_continuous()[0].astype('i')
+
     bg = rec['bg_pred'].as_continuous()
     fg = rec['fg_pred'].as_continuous()
 
@@ -46,7 +47,7 @@ def create_ms(n_targets):
     gain_sd = np.ones((n_targets, 3))
     template = {
         'id': 'MS',
-        'fn': 'rdt.modules.merge_streams',
+        'fn': 'lbhb.analysis.rdt.modules.merge_streams',
         'prior': {
             'gain': ('Normal', {'mean': gain_mean, 'sd': gain_sd})
         }
@@ -59,19 +60,19 @@ from nems.keywords import defaults as kw_registry
 def create_modelspec(recording, n_substreams):
     wc = kw_registry[f'wcg18x{n_substreams}']
     wc['id'] = f'RDTwcg18x{n_substreams}'
-    wc['fn'] = 'rdt.weight_channels.gaussian'
+    wc['fn'] = 'lbhb.analysis.rdt.weight_channels.gaussian'
     wc['fn_kwargs'].pop('i', None)
     wc['fn_kwargs'].pop('o', None)
 
     fir = kw_registry[f'fir{n_substreams}x10']
     fir['id'] = f'RDTfir{n_substreams}x10'
-    fir['fn'] = 'rdt.fir.basic'
+    fir['fn'] = 'lbhb.analysis.rdt.fir.basic'
     fir['fn_kwargs'].pop('i', None)
     fir['fn_kwargs'].pop('o', None)
 
     lvl = kw_registry['lvl1']
     lvl['id'] = f'RDTlvl1'
-    lvl['fn'] = 'rdt.modules.dual_lvl'
+    lvl['fn'] = 'lbhb.analysis.rdt.modules.dual_lvl'
     lvl['fn_kwargs'].pop('i', None)
     lvl['fn_kwargs'].pop('o', None)
 
