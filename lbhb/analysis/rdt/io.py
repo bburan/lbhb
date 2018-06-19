@@ -4,51 +4,19 @@ import pandas as pd
 import numpy as np
 import os.path
 
-from nems.recording import Recording
-from nems.epoch import merge_epoch
+from nems.recording import Recording, load_recording
+from nems.epoch import merge_epoch, group_epochs_by_parent, add_epoch
+from nems.preprocessing import average_away_epoch_occurrences
+
+from nems_db.baphy import baphy_data_path
 
 from joblib import Memory
 
-tmpdir = '/tmp/nems'
+#tmpdir = '/tmp/nems'
+tmpdir = '/auto/data/tmp'
 if not os.path.exists(tmpdir):
     os.makedirs(tmpdir, exist_ok=True)
 memory = Memory(cachedir=tmpdir)
-
-
-def get_sequence_epochs(epochs):
-    epochs = epochs.copy()
-    extract_token_id = lambda x: x.split(',')[1].strip()
-    join_token_id = lambda x: ':'.join(x)
-
-    epochs.loc[:, 'trial'] = None
-    t = epochs['name'] == 'TRIAL'
-    epochs.loc[:, 'trial'] = t.cumsum()-1
-    m = epochs.name.str.startswith('Stim')
-    subset = epochs.loc[m].copy()
-
-    subset.loc[:, 'name'] = subset['name'].apply(extract_token_id)
-
-    sequence = subset.groupby('trial')['name'] \
-        .apply(join_token_id) \
-        .astype('category')
-    sequence = sequence.reset_index()
-    sequence.loc[:, 'id'] = sequence['name'].values.codes
-    sequence_to_trial_map = sequence.groupby('id').trial.unique()
-
-    new_epochs = []
-    for sequence_id, trial_ids in sequence_to_trial_map.items():
-        new_epoch_name = f'SEQUENCE_{sequence_id}'
-        for trial_id in trial_ids:
-            m = epochs['name'] == f'TRIAL{trial_id}'
-            if m.sum() != 1:
-                raise ValueError('More than one match for trial')
-            epoch = epochs.loc[m].iloc[0]
-            new_epoch = epoch[['start', 'end']].copy()
-            new_epoch['name'] = new_epoch_name
-            new_epoch.name = None
-            new_epochs.append(new_epoch)
-
-    return pd.DataFrame(new_epochs)
 
 
 def mark_first_reference(epochs, prestim_silence=0.5):
@@ -62,6 +30,7 @@ def mark_first_reference(epochs, prestim_silence=0.5):
 
 
 def extract_stream_type(df):
+    df = df.copy()
     m = df['name'] == 'TRIAL'
     df['trial'] = m.cumsum()
     result = []
@@ -75,10 +44,14 @@ def extract_stream_type(df):
             stream_type = 'single'
         else:
             raise ValueError('stream type issue')
+        m = group['name'] == 'TRIAL'
+        if m.sum() != 1:
+            raise ValueError('Cannot find trial epoch')
+        start, end = group.loc[m].iloc[0][['start', 'end']]
         series = pd.Series({
             'name': stream_type,
-            'start': group['start'].min(),
-            'end': group['end'].max(),
+            'start': start,
+            'end': end,
         })
         result.append(series)
     return pd.DataFrame(result, columns=['name', 'start', 'end'])
@@ -95,19 +68,22 @@ def extract_sample_ids(df, stream):
                 else:
                     id = sample_id.split('+')[1]
                 series = pd.Series({
-                    'name': id,
+                    'name': int(id),
                     'start': row['start'],
                     'end': row['end'],
                 })
                 result.append(series)
             elif stream == 'fg':
                 series = pd.Series({
-                    'name': sample_id,
+                    'name': int(sample_id),
                     'start': row['start'],
                     'end': row['end'],
                 })
                 result.append(series)
-    return pd.DataFrame(result, columns=['name', 'start', 'end'])
+
+    result = pd.DataFrame(result, columns=['name', 'start', 'end'])
+    result['name'] = result['name'].apply(lambda x: f'{x:02.0f}')
+    return result
 
 
 def extract_repeating(df):
@@ -124,63 +100,32 @@ def extract_repeating(df):
 def extract_random(df):
     m = df['name'].apply(lambda x: 'Reference' in x)
     epoch = df.loc[m, ['start', 'end']].values
-    delta = epoch[:, 1]-epoch[:, 0]
-    duration = np.unique(np.round(delta, 2))
-    if len(duration) != 1:
-        raise ValueError('Cannot find sample duration')
-    # Shift by one sample duration. This means that the reference phase will
-    # exclude the very first reference but include the very first target (but
-    # not the repeating target).
-    epoch += duration[0]
+    epoch = merge_epoch(epoch)
     return pd.DataFrame({
-        'name': 'reference',
+        'name': 'random',
         'start': epoch[:, 0],
         'end': epoch[:, 1],
     }, columns=['name', 'start', 'end'])
 
 
-@memory.cache
-def reformat_RDT_recording(recording):
+def reformat_epochs(epochs, target_id):
     new_epochs = []
-    epochs = recording['stim'].epochs
-
-    state = recording['state']
-    state.chans = ['repeating', 'single_stream', 'target_id']
-
-    repeating = state.loc['repeating'].as_continuous()[0]
-    target_id = state.loc['target_id'].as_continuous()[0]
-    if np.any(target_id[repeating == 1] == 0):
-        # This is a sanity check to ensure that we always know the *correct*
-        # target when it matters (e.g., during the repeating phase).
-        raise ValueError('Data missing')
-
-    fg_samples = extract_sample_ids(epochs, stream='fg')
-    bg_samples = extract_sample_ids(epochs, stream='bg')
+    new_epochs.append(epochs)
+    fg_samples = extract_sample_ids(epochs, 'fg')
+    bg_samples = extract_sample_ids(epochs, 'bg')
     new_epochs.append(fg_samples.copy())
     new_epochs.append(bg_samples.copy())
-
     fg_samples['name'] = fg_samples['name'].apply(lambda x: f'fg_{x}')
     bg_samples['name'] = bg_samples['name'].apply(lambda x: f'bg_{x}')
     new_epochs.append(fg_samples.copy())
     new_epochs.append(bg_samples.copy())
-
-    recording['stim1'].epochs = fg_samples
-    recording['stim2'].epochs = bg_samples
-
     samples = pd.concat(new_epochs, ignore_index=True)
     samples.sort_values('start', inplace=True)
 
-    # Save this to the state to facilitate analysis.
-    state.epochs = samples
-    target_id = state.loc['target_id']
-
-    new_epochs.append(epochs)
-    new_epochs.append(get_sequence_epochs(epochs))
-
-    # Find out the targets
-
+    target_id.epochs = samples
     x = target_id.as_continuous()[0]
-    targets = np.unique(x[x != 0])
+    m = np.isfinite(x) & (x != 0)
+    targets = np.unique(x[m])
 
     # Tag the epochs as target and whether it's current or not.
     for i, target in enumerate(targets):
@@ -215,38 +160,6 @@ def reformat_RDT_recording(recording):
     epochs.drop_duplicates(inplace=True)
     epochs.sort_values('start', inplace=True)
 
-    state.epochs = epochs
-    recording['repeating'] = state.loc['repeating']
-    tid = state.loc['target_id'].as_continuous().astype('i')
-    recording['target_id'] = state._modified_copy(tid)
-
-    ss = state.loc['single_stream'].as_continuous().astype('bool')
-    ds = ~ss
-
-    recording['single_stream'] = state._modified_copy(ss)
-    recording['dual_stream'] = state._modified_copy(ds)
-
-    target_map = dict((t, i) for i, t in enumerate(targets))
-    target_map[0] = 0
-    x = target_id.as_continuous()
-    x_mapped = np.vectorize(target_map.get, otypes=[np.float])(x)
-
-    recording['target_id_map'] = target_id._modified_copy(x_mapped)
-    recording['target_id_map'].meta = {'target_map': target_map}
-    recording.meta = {'n_targets': len(targets)}
-
-    recording['fg'] = recording['stim1']
-    recording['bg'] = recording['stim2']
-    del recording.signals['stim1']
-    del recording.signals['stim2']
-    del recording.signals['state']
-
-    resp = recording['resp']
-    recording['resp'] = resp._modified_copy(resp._data[..., :-1])
-
-    epochs = recording.epochs[['name', 'start', 'end']]
-    epochs.index = np.arange(len(epochs))
-
     # This fixes a bug in BAPHY->NEMS conversion of timestamps (not all trials
     # from the same sequence are identical length and may be off by 0.001).
     # This should be fine for RDT data because all relevant epochs are
@@ -254,23 +167,87 @@ def reformat_RDT_recording(recording):
     epochs['start'] = epochs['start'].round(2)
     epochs['end'] = epochs['end'].round(2)
 
+    epochs = add_epoch(epochs, 'random', 'single')
+    epochs = add_epoch(epochs, 'repeating', 'single')
+    epochs = add_epoch(epochs, 'random', 'dual')
+    epochs = add_epoch(epochs, 'repeating', 'dual')
+
+    for i in range(len(targets)):
+        target_name = f'target_{i}'
+        epochs = add_epoch(epochs, target_name, 'random_single')
+        epochs = add_epoch(epochs, target_name, 'repeating_single')
+        epochs = add_epoch(epochs, target_name, 'random_dual')
+        epochs = add_epoch(epochs, target_name, 'repeating_dual')
+
+    return epochs
+
+
+@memory.cache
+def reformat_RDT_recording(recording):
+    epochs = recording['stim'].epochs
+    state = recording['state']
+    target_id = recording['state'].loc['target_id']
+
+    epochs = reformat_epochs(epochs, target_id)
+
+    # Fix NAN values
+    x = state._data.copy()
+    x[np.isnan(x)] = 0
+    x = x.astype('i')
+    x.flags['WRITEABLE'] = False
+    state._data = x
+
+    # Find out the targets
+    x = target_id.as_continuous()
+    targets = np.unique(x[np.isfinite(x)])
+    target_map = dict((t, i) for i, t in enumerate(targets))
+    target_map[0] = 0
+    x_mapped = np.vectorize(target_map.get, otypes=[np.float])(x)
+    m = ~np.isfinite(x_mapped)
+    x_mapped[m] = 0
+    x_mapped = x_mapped.astype('i')
+
+    recording['target_id_map'] = target_id._modified_copy(x_mapped)
+    recording['target_id_map'].meta = {'target_map': target_map}
+    recording.meta = {'n_targets': len(targets)}
+
+    resp = recording['resp']
+    recording['resp'] = resp._modified_copy(resp._data[..., :-1])
+
+    recording['dual_stream'] = state.loc['dual_stream']
+    recording['repeating'] = state.loc['repeating']
+
     for s in recording.signals.values():
         s.epochs = epochs
-        s._data = s._data.astype('double')
 
     return recording
 
 
 @memory.cache
-def load_recording(batch, cell, reformat=True):
-    from nems.recording import Recording
-    url = 'http://hyrax.ohsu.edu:3000/baphy/{}/{}?' \
-        'rasterfs=100&includeprestim=1&stimfmt=ozgf&chancount=18' \
-        '&pupil=0&stim=1&pertrial=1&runclass=RDT'
-    url = url.format(batch, cell)
-    recording = Recording.load_url(url)
+def load_recording(batch, cell, reformat=True, by_sequence=True):
+    from nems.recording import load_recording
+
+    options = {
+        'cellid': cell,
+        'batch': batch,
+        'rasterfs': 100,
+        'includeprestim': 1,
+        'stimfmt': 'ozgf',
+        'chancount': 18,
+        'pupil': 0,
+        'stim': 1,
+        'pertrial': 1,
+        'runclass': 'RDT',
+        'recache': False,
+    }
+
+    path = baphy_data_path(options, cell, batch)
+    recording = load_recording(path)
     if reformat:
         recording = reformat_RDT_recording(recording)
+
+    if by_sequence:
+        recording = average_away_epoch_occurrences(recording, '^SEQUENCE')
     return recording
 
 
