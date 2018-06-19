@@ -316,9 +316,12 @@ def load_analyzed_abr_data(abr_experiments, fix_missing_thresholds=False):
     for filename in abr_experiments['filename']:
         search_pattern = os.path.join(filename, '*-analyzed.txt')
         peaks = []
-        for analyzed_filename in glob(search_pattern):
-            p = _load_analysis(analyzed_filename, fix_missing_thresholds)
-            peaks.append(p)
-        peaks = pd.concat(peaks)
-        abr_data.append(peaks)
+        try:
+            for analyzed_filename in glob(search_pattern):
+                p = _load_analysis(analyzed_filename, fix_missing_thresholds)
+                peaks.append(p)
+            peaks = pd.concat(peaks)
+            abr_data.append(peaks)
+        except:
+            print(f'Error processing {filename}')
     return pd.concat(abr_data)
