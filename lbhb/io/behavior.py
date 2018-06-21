@@ -7,6 +7,7 @@ import pandas as pd
 import seaborn as sns
 import pylab as pl
 import bcolz
+from psi.data.io.bcolz_tools import load_ctable_as_df
 
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
@@ -61,21 +62,19 @@ def remove_empty_experiments(experiments):
     return valid_experiments
 
 
-@memory.cache(ignore=['progressbar'])
 def _load_trial_logs(experiments, progressbar=True):
     trial_logs = []
     experiment_info = []
     iterator = tqdm(experiments) if progressbar else experiments
     for e in iterator:
         tl_dirname = os.path.join(e, 'trial_log')
-        tl = bcolz.ctable(rootdir=tl_dirname).todataframe()
+        tl = load_ctable_as_df(tl_dirname)
         trial_logs.append(tl)
         ei = util.parse_filename(e)
         experiment_info.append(ei)
     return trial_logs, experiment_info
 
 
-@memory.cache(ignore=['progressbar'])
 def load_trial_logs(experiments, progressbar=True):
     trial_logs, experiment_info = _load_trial_logs(experiments, progressbar)
     experiment_info = pd.DataFrame(experiment_info)
