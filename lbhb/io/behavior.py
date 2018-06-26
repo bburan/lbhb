@@ -82,8 +82,10 @@ def load_trial_logs(experiments, progressbar=True):
                           keys=np.arange(len(trial_logs)),
                           names=['experiment', 'trial'],
                           sort=True)
-    return trial_log.join(experiment_info, on=['experiment'])
+    trial_log = trial_log.join(experiment_info, on=['experiment'])
 
+
+    return trial_log
 
 def load_sam_behavior(experiments, progressbar=True):
     data = load_trial_logs(experiments)
