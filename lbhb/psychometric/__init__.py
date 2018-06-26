@@ -61,16 +61,23 @@ def get_traces(fit, variables=None, levels=None):
 
     traces = fit.extract()
     for var in variables:
-        for level in levels.keys():
-            loc = traces[f'{var}_loc'][..., np.newaxis]
-            scale = traces[f'{var}_{level}_scale'][..., np.newaxis]
-            delta = traces[f'{var}_{level}_delta']
-            traces[f'{var}_{level}'] = loc + delta * scale
+        for level, info in levels.items():
+            if info['type'][var] == 'categorical':
+                loc = traces[f'{var}_loc'][..., np.newaxis]
+                scale = traces[f'{var}_{level}_scale'][..., np.newaxis]
+                delta = traces[f'{var}_{level}_delta']
+                traces[f'{var}_{level}'] = loc + delta * scale
+            elif info['type'][var] == 'continuous':
+                i = traces[f'{var}_loc'][..., np.newaxis]
+                b = traces[f'{var}_{level}_slope'][..., np.newaxis]
+                traces[f'{var}_{level}'] = i + b * info['x']
+            else:
+                raise ValueError
 
     renamed_traces = {}
     for k, v in traces.items():
         for l, n in levels.items():
-            k = re.sub(f'_{l}', f'_{n}', k)
+            k = re.sub(f'_{l}', f'_{n["name"]}', k)
         renamed_traces[k] = v
 
     return renamed_traces
@@ -84,6 +91,7 @@ def _get_fn_trace(x, traces, level, fn, *args, **kw):
     g = inverse_logit(np.exp(gt))
     l = traces['l'][..., np.newaxis]
     x_fit = x[..., np.newaxis, np.newaxis]
+    print(x_fit.shape, a.shape, b.shape, g.shape, l.shape)
     return fn(x_fit, a, b, g, l, *args, **kw)
 
 
