@@ -2,6 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 from nems.epoch import epoch_difference, epoch_union
+from nems.epoch import epoch_difference, epoch_intersection
 
 
 def select_balanced_targets(epochs, rng):
@@ -111,3 +112,35 @@ def shuffle_streams(recording):
     recording['bg'] = s._modified_copy(bg)
     return recording
 
+def select_times(recording, subset, random_only=True, dual_only=True):
+    '''
+    Parameters
+    ----------
+    recording : nems.recording.Recording
+        The recording object.
+    subset : Nx2 array
+        Epochs representing the selected subset (e.g., from an est/val split).
+    random_only : bool
+        If True, return only the repeating portion of the subset
+    dual_only : bool
+        If True, return only the dual stream portion of the subset
+    '''
+    epochs = recording['stim'].epochs
+
+    m_dual = epochs['name'] == 'dual'
+    m_repeating = epochs['name'] == 'repeating'
+    m_trial = epochs['name'] == 'TRIAL'
+
+    dual_epochs = epochs.loc[m_dual, ['start', 'end']].values
+    repeating_epochs = epochs.loc[m_repeating, ['start', 'end']].values
+    trial_epochs = epochs.loc[m_trial, ['start', 'end']].values
+
+    subset = trial_epochs.copy()
+
+    if random_only:
+        subset = epoch_difference(subset, repeating_epochs)
+
+    if dual_only:
+        subset = epoch_intersection(subset, dual_epochs)
+
+    return recording.select_times(subset)

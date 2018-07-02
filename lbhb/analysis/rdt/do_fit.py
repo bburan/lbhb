@@ -16,7 +16,6 @@ import nems.metrics.corrcoef
 import nems.analysis.test_prediction
 import nems.xforms
 import nems.plots.file
-from nems.epoch import epoch_difference, epoch_intersection
 
 from nems_db import db
 
@@ -41,25 +40,17 @@ def do_fit(batch, cell, wcg_n, fir_n, shuffle_phase, shuffle_stream):
     strf_kw = f'wcg18x{wcg_n}_fir{wcg_n}x{fir_n}_lvl1_dexp1'
     strf_modelspec = nems.initializers.from_keywords(strf_kw)
 
-    epochs = recording['stim'].epochs
+    prefit_recording = rdt.preprocessing.select_times(recording, est_times,
+                                                      random_only=True,
+                                                      dual_only=True)
 
-    m_dual = epochs['name'] == 'dual'
-    m_repeating = epochs['name'] == 'repeating'
-    m_trial = epochs['name'] == 'TRIAL'
+    est_recording = rdt.preprocessing.select_times(recording, est_times,
+                                                   random_only=False,
+                                                   dual_only=True)
 
-    dual_epochs = epochs.loc[m_dual, ['start', 'end']].values
-    repeating_epochs = epochs.loc[m_repeating, ['start', 'end']].values
-    trial_epochs = epochs.loc[m_trial, ['start', 'end']].values
-
-    # Remove repeating epochs from dual and fit
-    prefit_epochs = epoch_difference(trial_epochs, repeating_epochs)
-    prefit_epochs = epoch_intersection(est_times, prefit_epochs)
-    prefit_recording = recording.select_times(prefit_epochs)
-
-    est_epochs = epoch_intersection(est_times, dual_epochs)
-    val_epochs = epoch_intersection(val_times, dual_epochs)
-    est_recording = recording.select_times(est_epochs)
-    val_recording = recording.select_times(val_epochs)
+    val_recording = rdt.preprocessing.select_times(recording, val_times,
+                                                   random_only=False,
+                                                   dual_only=True)
 
     prefit_modelspec = nems.initializers.prefit_to_target(
         prefit_recording,

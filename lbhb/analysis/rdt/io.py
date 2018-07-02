@@ -215,10 +215,12 @@ def reformat_RDT_recording(recording):
     recording['resp'] = resp._modified_copy(resp._data[..., :-1])
 
     recording['dual_stream'] = state.loc['dual_stream']
-    recording['repeating'] = state.loc['repeating']
+    #recording['repeating'] = state.loc['repeating']
 
     for s in recording.signals.values():
         s.epochs = epochs
+
+    recording['repeating'] = recording['stim'].epoch_to_signal('repeating')
 
     return recording
 
