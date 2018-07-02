@@ -64,9 +64,7 @@ def split_est_val(recording, balance_phase=False):
         # Now, add back in selected targets from repeating phase
         val_times = epoch_union(val_times, target_times)
 
-    val = recording.select_times(val_times)
-    est = recording.select_times(est_times)
-    return est, val
+    return est_times, val_times
 
 
 def get_est_val_times_by_sequence(recording, rng):
@@ -97,4 +95,19 @@ def get_est_val_times_by_sequence(recording, rng):
     est_times = epochs.loc[m][['start', 'end']].values
 
     return est_times, val_times
+
+
+def shuffle_streams(recording):
+    fg = recording['fg'].as_continuous().copy()
+    bg = recording['bg'].as_continuous().copy()
+    i_all = np.arange(fg.shape[-1])
+    n = round(fg.shape[-1]/2)
+    np.random.shuffle(i_all)
+    i_switch = i_all[:n]
+    fg[:, i_switch], bg[:, i_switch] = bg[:, i_switch], fg[:, i_switch]
+
+    s = recording['fg']
+    recording['fg'] = s._modified_copy(fg)
+    recording['bg'] = s._modified_copy(bg)
+    return recording
 

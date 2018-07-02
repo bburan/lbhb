@@ -16,21 +16,19 @@ import nems.metrics.corrcoef
 import nems.analysis.test_prediction
 import nems.xforms
 import nems.plots.file
-from nems.epoch import epoch_difference
+from nems.epoch import epoch_difference, epoch_intersection
 
 from nems_db import db
 
 
-
-def do_fit(batch, cell, wcg_n, fir_n, dexp, shuffle_phase, shuffle_stream,
-           balance_phase, two_step, mode):
+def do_fit(batch, cell, wcg_n, fir_n, shuffle_phase, shuffle_stream):
 
     recording = rdt.io.load_recording(batch, cell, True, True)
-    modelspec = rdt.modules.create_modelspec(recording, wcg_n, fir_n, dexp, mode)
-    model_name = '_'.join(m['id'] for m in modelspec)
+    est_times, val_times = rdt.preprocessing.split_est_val(recording, False)
 
-    if balance_phase:
-        model_name = f'balancePhase_{model_name}'
+    modelspec = rdt.modules.create_modelspec(recording, wcg_n, fir_n, True, 'dual')
+    modelspec = nems.priors.set_mean_phi(modelspec)
+    model_name = '_'.join(m['id'] for m in modelspec)
 
     if shuffle_phase:
         model_name = f'shufflePhase_{model_name}'
@@ -38,82 +36,63 @@ def do_fit(batch, cell, wcg_n, fir_n, dexp, shuffle_phase, shuffle_stream,
 
     if shuffle_stream:
         model_name = f'shuffleStream_{model_name}'
-        recording['dual_stream'] = recording['dual_stream'].shuffle_time()
+        recording = rdt.preprocessing.shuffle_streams(recording)
 
-    est, val = rdt.preprocessing.split_est_val(recording, balance_phase)
+    strf_kw = f'wcg18x{wcg_n}_fir{wcg_n}x{fir_n}_lvl1_dexp1'
+    strf_modelspec = nems.initializers.from_keywords(strf_kw)
 
-    if two_step:
-        if not dexp:
-            raise ValueError('Cannot fit two step without dexp')
+    epochs = recording['stim'].epochs
 
-        model_name = f'twoStep_{model_name}'
+    m_dual = epochs['name'] == 'dual'
+    m_repeating = epochs['name'] == 'repeating'
+    m_trial = epochs['name'] == 'TRIAL'
 
-        # Extract epochs for first step of fit
-        epochs = recording['stim'].epochs
-        m = epochs['name'] == 'repeating'
-        repeating_epochs = epochs.loc[m, ['start', 'end']].values
-        m = epochs['name'] == 'TRIAL'
-        trial_epochs = epochs.loc[m, ['start', 'end']].values
-        fit_epochs = epoch_difference(trial_epochs, repeating_epochs)
+    dual_epochs = epochs.loc[m_dual, ['start', 'end']].values
+    repeating_epochs = epochs.loc[m_repeating, ['start', 'end']].values
+    trial_epochs = epochs.loc[m_trial, ['start', 'end']].values
 
-        ms = f'wcg18x{wcg_n}_fir{wcg_n}x{fir_n}_lvl1_dexp1'
-        strf_modelspec = nems.initializers.from_keywords(ms)
+    # Remove repeating epochs from dual and fit
+    prefit_epochs = epoch_difference(trial_epochs, repeating_epochs)
+    prefit_epochs = epoch_intersection(est_times, prefit_epochs)
+    prefit_recording = recording.select_times(prefit_epochs)
 
-        initial_est = est.select_times(fit_epochs)
+    est_epochs = epoch_intersection(est_times, dual_epochs)
+    val_epochs = epoch_intersection(val_times, dual_epochs)
+    est_recording = recording.select_times(est_epochs)
+    val_recording = recording.select_times(val_epochs)
 
-        step1_modelspec = nems.initializers.prefit_to_target(
-            initial_est,
-            strf_modelspec,
-            nems.analysis.api.fit_basic,
-            target_module='levelshift',
-            fit_kwargs={'options': {'ftol': 1e-9, 'maxiter': 1000}},
-        )
+    prefit_modelspec = nems.initializers.prefit_to_target(
+        prefit_recording,
+        strf_modelspec,
+        nems.analysis.api.fit_basic,
+        target_module='levelshift',
+        fit_kwargs={'options': {'ftol': 1e-4, 'maxiter': 1000}},
+    )
 
-        step2_modelspec, = nems.analysis.api.fit_basic(
-            est,
-            step1_modelspec,
-            fitter=nems.fitters.api.scipy_minimize,
-            fit_kwargs={'options': {'ftol': 1e-10}},
-        )
+    strf_modelspec, = nems.analysis.api.fit_basic(
+        est_recording,
+        prefit_modelspec,
+        fitter=nems.fitters.api.scipy_minimize,
+        fit_kwargs={'options': {'ftol': 1e-8, 'maxiter': 1000}},
+    )
 
-        # Copy over fitted phi
-        modelspec[0]['phi'] = step2_modelspec[0]['phi'].copy()
-        modelspec[1]['phi'] = step2_modelspec[1]['phi'].copy()
-        modelspec[3]['phi'] = step2_modelspec[2]['phi'].copy()
-        modelspec[4]['phi'] = step2_modelspec[3]['phi'].copy()
+    # Copy over fitted phi
+    modelspec[0]['phi'] = strf_modelspec[0]['phi'].copy()
+    modelspec[1]['phi'] = strf_modelspec[1]['phi'].copy()
+    modelspec[3]['phi'] = strf_modelspec[2]['phi'].copy()
+    modelspec[4]['phi'] = strf_modelspec[3]['phi'].copy()
 
-        mapper = partial(nems.fitters.mappers.simple_vector, subset=[2])
-        final_modelspecs = nems.analysis.api.fit_basic(
-            recording,
-            modelspec,
-            fitter=nems.fitters.api.scipy_minimize,
-            fit_kwargs={'options': {'ftol': 1e-12, 'gtol': 1e-12}},
-            mapper=mapper,
-        )
-
-    else:
-        # Single fit
-        if dexp:
-            prefit_modelspec = nems.initializers.prefit_to_target(
-                est,
-                modelspec,
-                nems.analysis.api.fit_basic,
-                target_module='stream_merge',
-                fitter=nems.fitters.api.scipy_minimize,
-                fit_kwargs={'options': {'ftol': 1e-7, 'maxiter': 1000}}
-            )
-        else:
-            prefit_modelspec = modelspec
-
-        final_modelspecs = nems.analysis.api.fit_basic(
-            est,
-            prefit_modelspec,
-            fitter=nems.fitters.api.scipy_minimize,
-            fit_kwargs={'options': {'ftol': 1e-12, 'gtol': 1e-12}}
-        )
+    mapper = partial(nems.fitters.mappers.simple_vector, subset=[2])
+    final_modelspecs = nems.analysis.api.fit_basic(
+        est_recording,
+        modelspec,
+        fitter=nems.fitters.api.scipy_minimize,
+        fit_kwargs={'options': {'ftol': 1e-20, 'maxiter': 5000}},
+        mapper=mapper,
+    )
 
     est_pred, val_pred = nems.analysis.api \
-        .generate_prediction(est, val, final_modelspecs)
+        .generate_prediction(est_recording, val_recording, final_modelspecs)
 
     final_modelspecs = nems.analysis.api \
         .standard_correlation(est_pred, val_pred, final_modelspecs)
@@ -143,6 +122,10 @@ def do_fit(batch, cell, wcg_n, fir_n, dexp, shuffle_phase, shuffle_stream,
                               modelspecs=final_modelspecs, xfspec=['custom'],
                               log='None', figures=[])
 
+    context = {'est': est_pred, 'val': val_pred, 'modelspecs': final_modelspecs}
+    f = nems.plots.api.quickplot(context);
+    f.savefig(os.path.join(destination, 'quickplot.png'))
+
 
 def main():
     import argparse
@@ -155,10 +138,6 @@ def main():
     parser.add_argument('--fir_n', type=int, help='FIR ntaps', default=15)
     parser.add_argument('--shuffle-phase', action='store_true', help='Shuffle phase')
     parser.add_argument('--shuffle-stream', action='store_true', help='Shuffle stream')
-    parser.add_argument('--balance-phase', action='store_true', help='Balance targets across phase')
-    parser.add_argument('--dexp', action='store_true', help='Use dexp?')
-    parser.add_argument('--two-step', action='store_true', help='Two step fit?')
-    parser.add_argument('--mode', type=str, default='dual', help='Fit mode')
     parser.add_argument('model', type=str, help='Model name (ignored)', nargs='?')
 
     args = parser.parse_args()
@@ -166,9 +145,8 @@ def main():
         db.update_job_start(qid)
         nems.utils.progress_fun = db.update_job_tick
 
-    do_fit(args.batch, args.cell, args.wcg_n, args.fir_n, args.dexp,
-           args.shuffle_phase, args.shuffle_stream, args.balance_phase,
-           args.two_step, args.mode)
+    do_fit(args.batch, args.cell, args.wcg_n, args.fir_n, args.shuffle_phase,
+           args.shuffle_stream)
 
     if qid is not None:
         db.update_job_complete(qid)
