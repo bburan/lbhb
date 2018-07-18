@@ -135,8 +135,6 @@ def select_times(recording, subset, random_only=True, dual_only=True):
     repeating_epochs = epochs.loc[m_repeating, ['start', 'end']].values
     trial_epochs = epochs.loc[m_trial, ['start', 'end']].values
 
-    subset = trial_epochs.copy()
-
     if random_only:
         subset = epoch_difference(subset, repeating_epochs)
 

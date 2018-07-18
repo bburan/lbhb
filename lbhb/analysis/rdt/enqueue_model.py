@@ -27,8 +27,7 @@ def main():
 
 
     for shuffle_phase in (True, False):
-        #for shuffle_stream in (True, False):
-        for shuffle_stream in (True,):
+        for shuffle_stream in (True, False):
             modelname = generate_modelname(args.wcg_n, args.fir_n,
                                            shuffle_phase, shuffle_stream)
 
@@ -42,7 +41,7 @@ def main():
 
             for batch in (269, 273):
                 for cell in db.get_batch_cells(batch=batch)['cellid']:
-                    db.enqueue_single_model(batch, cell, modelname,
+                    db.enqueue_single_model(cell, batch, modelname,
                                             force_rerun=True, user='bburan',
                                             executable_path=executable_path,
                                             script_path=script_path)

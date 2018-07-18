@@ -1,4 +1,5 @@
 import os
+import copy
 
 import pylab as pl
 import numpy as np
@@ -37,13 +38,6 @@ def do_fit(batch, cell, wcg_n, fir_n, shuffle_phase, shuffle_stream):
         model_name = f'shuffleStream_{model_name}'
         recording = rdt.preprocessing.shuffle_streams(recording)
 
-    strf_kw = f'wcg18x{wcg_n}_fir{wcg_n}x{fir_n}_lvl1_dexp1'
-    strf_modelspec = nems.initializers.from_keywords(strf_kw)
-
-    prefit_recording = rdt.preprocessing.select_times(recording, est_times,
-                                                      random_only=True,
-                                                      dual_only=True)
-
     est_recording = rdt.preprocessing.select_times(recording, est_times,
                                                    random_only=False,
                                                    dual_only=True)
@@ -52,33 +46,35 @@ def do_fit(batch, cell, wcg_n, fir_n, shuffle_phase, shuffle_stream):
                                                    random_only=False,
                                                    dual_only=True)
 
-    prefit_modelspec = nems.initializers.prefit_to_target(
-        prefit_recording,
-        strf_modelspec,
-        nems.analysis.api.fit_basic,
-        target_module='levelshift',
+    # Fit all but the gain term. Do not include dexp (note the modelspec
+    # slice).
+    mapper = partial(nems.fitters.mappers.simple_vector, subset=[0, 1, 3])
+    prefit_modelspec, = nems.analysis.api.fit_basic(
+        est_recording,
+        modelspec[:-1],
+        fitter=nems.fitters.api.scipy_minimize,
         fit_kwargs={'options': {'ftol': 1e-4, 'maxiter': 1000}},
     )
 
+    # Copy over the prefit modelspec items
+    modelspec[:-1] = copy.deepcopy(prefit_modelspec)
+
+    # Fit all but the gain term. Include dexp this time.
+    mapper = partial(nems.fitters.mappers.simple_vector, subset=[0, 1, 3, 4])
     strf_modelspec, = nems.analysis.api.fit_basic(
         est_recording,
-        prefit_modelspec,
+        modelspec,
         fitter=nems.fitters.api.scipy_minimize,
         fit_kwargs={'options': {'ftol': 1e-8, 'maxiter': 1000}},
     )
 
-    # Copy over fitted phi
-    modelspec[0]['phi'] = strf_modelspec[0]['phi'].copy()
-    modelspec[1]['phi'] = strf_modelspec[1]['phi'].copy()
-    modelspec[3]['phi'] = strf_modelspec[2]['phi'].copy()
-    modelspec[4]['phi'] = strf_modelspec[3]['phi'].copy()
-
-    mapper = partial(nems.fitters.mappers.simple_vector, subset=[2])
+    # Now fit gain, level and dexp
+    mapper = partial(nems.fitters.mappers.simple_vector, subset=[2, 3, 4])
     final_modelspecs = nems.analysis.api.fit_basic(
         est_recording,
-        modelspec,
+        strf_modelspec,
         fitter=nems.fitters.api.scipy_minimize,
-        fit_kwargs={'options': {'ftol': 1e-20, 'maxiter': 5000}},
+        fit_kwargs={'options': {'ftol': 1e-10, 'maxiter': 5000}},
         mapper=mapper,
     )
 
@@ -123,8 +119,8 @@ def main():
 
     qid = os.environ.get('QUEUEID', None)
     parser = argparse.ArgumentParser(description='Fit cell from batch to model')
-    parser.add_argument('batch', type=str, help='Batch ID containing data')
-    parser.add_argument('cell', type=str, help='Cell ID to fit')
+    parser.add_argument('cell', type=str, help='Batch ID containing data')
+    parser.add_argument('batch', type=str, help='Cell ID to fit')
     parser.add_argument('--wcg_n', type=int, help='wcg rank', default=2)
     parser.add_argument('--fir_n', type=int, help='FIR ntaps', default=15)
     parser.add_argument('--shuffle-phase', action='store_true', help='Shuffle phase')
