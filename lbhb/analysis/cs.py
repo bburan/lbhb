@@ -17,6 +17,7 @@ def _days_re_exposure(row):
 def add_days_re_exposure(df):
     return df.apply(_days_re_exposure, axis=1)
 
+
 def mark_replicates(df):
 
     def _helper(row):

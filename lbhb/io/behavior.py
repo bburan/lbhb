@@ -87,6 +87,7 @@ def load_trial_logs(experiments, progressbar=True):
 
     return trial_log
 
+
 def load_sam_behavior(experiments, progressbar=True):
     data = load_trial_logs(experiments)
 
