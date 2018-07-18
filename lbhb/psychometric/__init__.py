@@ -13,16 +13,16 @@ import seaborn as sns
 from matplotlib import gridspec
 
 
-def logit(x):
-    return x/(1+x)
+#def logit(x):
+#    return x/(1+x)
 
 
-def inverse_logit(y):
-    return -y/(y-1)
+def inv_logit(y):
+    return 1/(1+np.exp(-y))
 
 
-def glogit(x, y):
-    return x/(1+x+y)
+#def glogit(x, y):
+#    return x/(1+x+y)
 
 
 def compute_psi(x, a, b, g, l):
@@ -50,48 +50,62 @@ def dprime(p):
     return norm.ppf(p_clipped) - norm.ppf(p_clipped[0])
 
 
-def get_traces(fit, variables=None, levels=None):
-    if variables is None:
-        variables = []
+def get_traces(fit, levels=None):
     if levels is None:
-        levels = []
-
-    if isinstance(levels, (list, tuple)):
-        levels = {l: l for l in levels}
+        levels = {}
 
     traces = fit.extract()
-    for var in variables:
-        for level, info in levels.items():
-            if info['type'][var] == 'categorical':
+
+    for level, level_info in levels.items():
+        for var, var_type in level_info['type'].items():
+            if var_type == 'categorical':
                 loc = traces[f'{var}_loc'][..., np.newaxis]
                 scale = traces[f'{var}_{level}_scale'][..., np.newaxis]
                 delta = traces[f'{var}_{level}_delta']
                 traces[f'{var}_{level}'] = loc + delta * scale
-            elif info['type'][var] == 'continuous':
+            elif var_type == 'continuous':
                 i = traces[f'{var}_loc'][..., np.newaxis]
                 b = traces[f'{var}_{level}_slope'][..., np.newaxis]
-                traces[f'{var}_{level}'] = i + b * info['x']
-            else:
-                raise ValueError
+                traces[f'{var}_{level}'] = i + b * level_info['x']
+            elif var_type is None:
+                if var in traces:
+                    traces[f'{var}_{level}'] = traces[var]
+                else:
+                    traces[f'{var}_{level}'] = traces[f'{var}_loc']
 
     renamed_traces = {}
     for k, v in traces.items():
         for l, n in levels.items():
-            k = re.sub(f'_{l}', f'_{n["name"]}', k)
-        renamed_traces[k] = v
+            name = n['name']
+            if k.endswith(l):
+                k = re.sub(f'_{l}', f'_{name}', k)
+                if k == f'gt_{name}':
+                    k = f'g_{name}'
+                    v = inv_logit(v)
+                if k == f'bt_{name}':
+                    k = f'b_{name}'
+                    v = np.exp(v)
+                renamed_traces[k] = v
+            elif '_' not in k:
+                renamed_traces[k] = v
 
     return renamed_traces
 
 
+def _get_and_reshape_trace(traces, name):
+    x = traces[name]
+    if x.ndim == 1:
+        return x[..., np.newaxis]
+    else:
+        return x
+
+
 def _get_fn_trace(x, traces, level, fn, *args, **kw):
-    a = traces[f'a_{level}']
-    gt = traces[f'gt_{level}']
-    bt = traces[f'bt_{level}']
-    b = np.exp(bt)
-    g = inverse_logit(np.exp(gt))
-    l = traces['l'][..., np.newaxis]
+    a = _get_and_reshape_trace(traces, f'a_{level}')
+    g = _get_and_reshape_trace(traces, f'g_{level}')
+    b = _get_and_reshape_trace(traces, f'b_{level}')
+    l = _get_and_reshape_trace(traces, f'l')
     x_fit = x[..., np.newaxis, np.newaxis]
-    print(x_fit.shape, a.shape, b.shape, g.shape, l.shape)
     return fn(x_fit, a, b, g, l, *args, **kw)
 
 
@@ -112,15 +126,22 @@ def get_threshold_trace(x, traces, level, threshold=1, clip=0.05, fillna=False):
 
 
 def get_subplot_iter(n_labels, figure=None, subplot_spec=None):
-    n = int(np.ceil(np.sqrt(n_labels)))
+    #n = int(np.ceil(np.sqrt(n_labels)))
+    cols = 5
+    rows = int(np.ceil(n_labels/cols))
+    #rows = int(np.ceil(np.sqrt(n_labels)))
+    #cols = int(np.floor(np.sqrt(n_labels)))
+    if (rows*cols) < n_labels:
+        rows += 1
+
     if subplot_spec is None:
-        f, axes = pl.subplots(n, n, sharex=True, sharey=True, figsize=(2*n, 2*n))
+        f, axes = pl.subplots(rows, cols, sharex=True, sharey=True, figsize=(2*n, 2*n))
     else:
-        gs = gridspec.GridSpecFromSubplotSpec(n, n, subplot_spec=subplot_spec)
+        gs = gridspec.GridSpecFromSubplotSpec(rows, cols, subplot_spec=subplot_spec)
         axes = []
-        for i in range(n):
+        for i in range(rows):
             row = []
-            for j in range(n):
+            for j in range(cols):
                 if (i == 0) and (j == 0):
                     base_ax = pl.Subplot(figure, gs[i, j])
                     row.append(base_ax)
@@ -137,11 +158,11 @@ def get_subplot_iter(n_labels, figure=None, subplot_spec=None):
 
 
 def plot_level_ci(x, trace, th_trace, labels, data=None, figure=None,
-                  subplot_spec=None):
+                  subplot_spec=None, mode='dprime'):
 
     lb, ub = np.percentile(trace, [2.5, 97.5], axis=1)
     mean = np.mean(trace, axis=1)
-    th_mean = np.mean(th_trace, axis=0)
+    #th_mean = np.mean(th_trace, axis=0)
 
     n_labels = len(labels)
     axes, ax_iter = get_subplot_iter(n_labels, figure, subplot_spec)
@@ -150,13 +171,17 @@ def plot_level_ci(x, trace, th_trace, labels, data=None, figure=None,
         p, = ax.plot(x, mean[:, i], label=f'{l}')
         ax.fill_between(x, lb[:, i], ub[:, i],
                         facecolor='0.75', alpha=0.5, label='95% CI')
-        ax.axvline(th_mean[i], color='k', ls=':')
-        ax.axhline(1, color='k', ls=':')
+        #ax.axvline(th_mean[i], color='k', ls=':')
+        #ax.axhline(1, color='k', ls=':')
         if data is not None:
             d = data.iloc[:, i].dropna()
             if len(d) >= 2:
                 d_x = d.index.astype('f')
-                ax.plot(d_x, dprime(d.values), 'ko')
+                if mode == 'dprime':
+                    d_y = dprime(d.values)
+                else:
+                    d_y = d.values
+                ax.plot(d_x, d_y, 'ko')
 
         ax.set_title(f'{l}')
 
@@ -183,7 +208,6 @@ def plot_level(x, trace, labels, figure, subplot_spec):
 def plot_trace(trace, labels, figure, subplot_spec):
     ax = pl.Subplot(figure, subplot_spec)
     figure.add_subplot(ax)
-    #f, ax = pl.subplots(1, 1, figsize=(6, 4))
     lb, ub = np.percentile(trace, [2.5, 97.5], axis=0)
     mean = np.mean(trace, axis=0)
     yerr = np.vstack((mean-lb, ub-mean))
@@ -192,8 +216,6 @@ def plot_trace(trace, labels, figure, subplot_spec):
     ax.xaxis.set_ticks(i)
     ax.xaxis.set_ticklabels(f'{l}' for l in labels)
     return ax
-    #ax.axis(ymin=0, ymax=1)
-    #ax.set_ylabel('AM depth')
 
 
 def plot_trace_posterior(th_trace, labels, figure, subplot_spec):
@@ -217,45 +239,117 @@ def plot_trace_posterior(th_trace, labels, figure, subplot_spec):
     pl.tight_layout()
 
 
-def summarize_level(x, traces, level, labels=None, data=None):
-    if data is not None:
-        d = data.groupby([level, 'depth'])[['size', 'sum']].sum()
-        d['p'] = d['sum']/d['size']
-        d = d['p'].unstack(level)
+def summarize_level_psi(x, trace, labels, data=None, figure=None,
+                        subplot_spec=None):
 
-        if labels is None:
-            level_data = data[level].values
-            if isinstance(level_data, pd.Categorical):
-                labels = level_data.categories.values
-    else:
-        d = None
+    lb, ub = np.percentile(trace, [2.5, 97.5], axis=1)
+    mean = np.mean(trace, axis=1)
 
+    n_labels = len(labels)
+    axes, ax_iter = get_subplot_iter(n_labels, figure, subplot_spec)
+
+    for ax, (i, l) in zip(ax_iter, enumerate(labels)):
+        p, = ax.plot(x, mean[:, i], label=f'{l}')
+        ax.fill_between(x, lb[:, i], ub[:, i],
+                        facecolor='0.75', alpha=0.5, label='95% CI')
+        if data is not None:
+            d = data.iloc[:, i].dropna()
+            if len(d) >= 2:
+                d_x = d.index.astype('f')
+                d_y = d.values
+                ax.plot(d_x, d_y, 'ko')
+
+        ax.set_title(f'{l}')
+
+    for ax in axes[:, 0]:
+        ax.set_ylabel("$d'$")
+    for ax in axes[-1, :]:
+        ax.set_xlabel('AM depth')
+    pl.tight_layout()
+
+
+def summarize_psi(x, traces, level, labels, data):
+    d = data.groupby([level, 'depth'])[['size', 'sum']].sum()
+    d['p'] = d['sum']/d['size']
+    d = d['p'].unstack(level)
     x_log = np.log(x)
-    trace = get_dprime_trace(x_log, traces, level)
-    th_log_trace = get_threshold_trace(x_log, traces, level, fillna=True)
-    th_trace = np.exp(th_log_trace)
-
-    if labels is None:
-        labels = np.arange(trace.shape[-1])
 
     gs = gridspec.GridSpec(6, 2)
-    figure = pl.figure(figsize=(12, 12))
+    figure = pl.figure(figsize=(10, 12))
 
-    plot_level(x, trace, labels, figure=figure, subplot_spec=gs[0, 0])
-    ax = plot_trace(th_trace, labels, figure=figure, subplot_spec=gs[0, 1])
-    ax.axis(ymin=0, ymax=1)
-    ax.set_ylabel('AM depth')
+    ax_fn = gs[:2, 0]
+    ax_fn_individual = gs[2:, :]
+    ax_mid = gs[0, 1]
+    ax_fa = gs[1, 1]
+    #ax_slope = gs[2, 1]
 
-    b_trace = np.exp(traces[f'bt_{level}'])
-    ax = plot_trace(b_trace, labels, figure=figure, subplot_spec=gs[1, 1])
-    ax.set_ylabel('Slope')
+    trace = get_psi_trace(x_log, traces, level)
+    plot_level(x, trace, labels, figure=figure, subplot_spec=ax_fn)
+    summarize_level_psi(x, trace, labels, d, figure=figure, subplot_spec=ax_fn_individual)
 
-    g_trace = inverse_logit(np.exp(traces[f'gt_{level}']))
-    ax = plot_trace(g_trace, labels, figure=figure, subplot_spec=gs[1, 0])
+    #b_trace = np.exp(traces[f'bt_{level}'])
+    #ax = plot_trace(b_trace, labels, figure=figure, subplot_spec=ax_slope)
+    #ax.set_ylabel('Slope')
+
+    a_trace = np.exp(traces[f'a_{level}'])
+    ax = plot_trace(a_trace, labels, figure=figure, subplot_spec=ax_mid)
+    ax.set_ylabel('Midpoint')
+
+    g_trace = traces[f'g_{level}']
+    ax = plot_trace(g_trace, labels, figure=figure, subplot_spec=ax_fa)
     ax.set_ylabel('FA rate')
 
-    plot_level_ci(x, trace, th_trace, labels, d, figure=figure, subplot_spec=gs[2:, 0])
-    plot_threshold_posterior(th_trace, labels, figure=figure, subplot_spec=gs[2:, 1])
+
+    #plot_level_ci(x, trace, th_trace, labels, d, figure=figure, subplot_spec=ax_dprime_individual)
+    #plot_trace_posterior(th_trace, labels, figure=figure, subplot_spec=ax_threshold_individual)
+    pl.tight_layout()
+
+
+def summarize_level(x, traces, level, labels, data, mode='dprime'):
+
+    d = data.groupby([level, 'depth'])[['size', 'sum']].sum()
+    d['p'] = d['sum']/d['size']
+    d = d['p'].unstack(level)
+
+    x_log = np.log(x)
+
+    gs = gridspec.GridSpec(6, 2)
+    figure = pl.figure(figsize=(10, 12))
+
+    ax_dprime = gs[:2, 0]
+    ax_dprime_individual = gs[2:, :]
+    ax_threshold = gs[0, 1]
+    ax_fa = gs[1, 1]
+    #ax_slope = gs[2, 1]
+
+    if mode == 'dprime':
+        trace = get_dprime_trace(x_log, traces, level)
+        th_log_trace = get_threshold_trace(x_log, traces, level, fillna=True)
+        th_trace = np.exp(th_log_trace)
+        plot_level(x, trace, labels, figure=figure, subplot_spec=ax_dprime)
+        ax = plot_trace(th_trace, labels, figure=figure, subplot_spec=ax_threshold)
+        ax.axis(ymin=0, ymax=1)
+        ax.set_ylabel('AM depth')
+    else:
+        trace = get_psi_trace(x_log, traces, level)
+        #th_log_trace = get_threshold_trace(x_log, traces, level, fillna=True)
+        #th_trace = np.exp(th_log_trace)
+        plot_level(x, trace, labels, figure=figure, subplot_spec=ax_dprime)
+        #ax = plot_trace(th_trace, labels, figure=figure, subplot_spec=ax_threshold)
+        #ax.axis(ymin=0, ymax=1)
+        #ax.set_ylabel('AM depth')
+
+    #b_trace = np.exp(traces[f'bt_{level}'])
+    #ax = plot_trace(b_trace, labels, figure=figure, subplot_spec=ax_slope)
+    #ax.set_ylabel('Slope')
+
+    g_trace = traces[f'g_{level}']
+    ax = plot_trace(g_trace, labels, figure=figure, subplot_spec=ax_fa)
+    ax.set_ylabel('FA rate')
+
+    plot_level_ci(x, trace, th_trace, labels, d, figure=figure, subplot_spec=ax_dprime_individual)
+    #plot_trace_posterior(th_trace, labels, figure=figure, subplot_spec=ax_threshold_individual)
+    pl.tight_layout()
 
 
 def summarize_chains(fit):
@@ -282,9 +376,9 @@ def CachedStanModel(model_file, model_name=None, **kwargs):
         model_code = fh.read().decode('utf8')
     code_hash = md5(model_code.encode('ascii')).hexdigest()
     if model_name is None:
-        cache_fn = 'cached-model-{}.pkl'.format(code_hash)
+        cache_fn = 'cached models/cached-model-{}.pkl'.format(code_hash)
     else:
-        cache_fn = 'cached-{}-{}.pkl'.format(model_name, code_hash)
+        cache_fn = 'cached models/cached-{}-{}.pkl'.format(model_name, code_hash)
     try:
         sm = pickle.load(open(cache_fn, 'rb'))
     except:
