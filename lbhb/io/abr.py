@@ -7,17 +7,212 @@ hard to add, but would need support for trial_filter specs as well as ensuring t
 pull out enough pre/post samples for proper trial_filtering.
 '''
 import ast
+import functools
+from pathlib import Path
 import os.path
 import shutil
 import re
 from glob import glob
 
+from tqdm import tqdm
 import bcolz
 import numpy as np
 import pandas as pd
 from scipy import signal
 
 from . import util
+
+from psi.data.io import abr
+
+
+MAXSIZE = 1024
+
+
+def load_analysis(base_folder):
+    search_pattern = os.path.join(base_folder, '*-analyzed.txt')
+    result = [load_abr_analysis(f) for f in glob(search_pattern)]
+
+    names = ['analyzer', 'start', 'end', 'filter_lb', 'filter_ub', 'frequency']
+    freq, th, info, data = zip(*result)
+
+    keys = []
+    for f, i in zip(freq, info):
+        key = tuple(i[n] for n in names[:-1]) + (f,)
+        keys.append(key)
+
+    index = pd.MultiIndex.from_tuples(keys, names=names)
+    threshold = pd.Series(th, index=index, name='threshold')
+    peaks = pd.concat(data, keys=keys, names=names)
+    peaks.sort_index(inplace=True)
+    return threshold, peaks
+
+
+def cleanup_analysis(result, info, simplify, analyzer):
+    if analyzer is not None:
+        result = result.xs(analyzer, level='analyzer')
+    if not simplify:
+        return result
+    remove = []
+    for level in result.index.names:
+        if level not in info:
+            values = result.index.get_level_values(level)
+            if len(set(values)) == 1:
+                remove.append(level)
+    result.reset_index(remove, drop=True, inplace=True)
+    return result
+
+
+class ABRDataset:
+
+    def __init__(self, experiments):
+        self.experiments = experiments
+
+    @classmethod
+    def from_folder(cls, folder):
+        folder = Path(folder)
+        experiments = [ABRExperiment(f) for f in folder.glob('*abr')]
+        return cls(experiments)
+
+    def get_thresholds(self, columns, simplify=True, analyzer=None):
+        keys = self.get_info(columns, 'list')
+        thresholds = [e.all_thresholds for e in self.experiments]
+        result = pd.concat(thresholds, keys=keys, names=columns)
+        return cleanup_analysis(result, columns, simplify, analyzer)
+
+    def get_waves(self, columns, simplify=True, analyzer=None):
+        keys = self.get_info(columns, 'list')
+        waves = [e.all_waves for e in self.experiments]
+        result = pd.concat(waves, keys=keys, names=columns)
+        return cleanup_analysis(result, columns, simplify, analyzer)
+
+    def get_epochs(self, columns, **kwargs):
+        keys = self.get_info(columns, 'list')
+        epochs = [e.get_mean_epochs(**kwargs) for e in self.experiments]
+        return pd.concat(epochs, keys=keys, names=columns)
+
+    def find_experiments(self, **kwargs):
+        if 'date' in kwargs:
+            if isinstance(kwargs['date'], pd.Timestamp):
+                kwargs['date'] = kwargs['date'].date()
+        cols = kwargs.keys()
+        vals = tuple(kwargs.values())
+        matches = []
+        for e in self.experiments:
+            if e.get_info(cols) == vals:
+                matches.append(e)
+        return matches
+
+    def get_experiment(self, **kwargs):
+        experiments = self.find_experiments(**kwargs)
+        if len(experiments) > 1:
+            raise ValueError('More than one match')
+        elif len(experiments) < 1:
+            raise ValueError('No experiment matching criteria')
+        else:
+            return experiments[0]
+
+    def get_info(self, columns, flavor='dataframe'):
+        info = [e.get_info(columns) for e in self.experiments]
+        if flavor == 'dataframe':
+            return pd.DataFrame(info, columns=columns)
+        elif flavor == 'index':
+            return pd.MultiIndex.from_tuples(info, names=columns)
+        elif flavor == 'list':
+            return info
+
+    def __getitem__(self, slice):
+        return self.experiments[slice]
+
+    def __iter__(self):
+        return iter(self.experiments)
+
+
+class ABRExperiment:
+
+    def __init__(self, base_folder):
+        self._base_folder = base_folder
+        self._fh = abr.load(base_folder)
+
+    def get_info(self, columns, verify_integrity=False, flavor='tuple'):
+        info = util.parse_filename(self._base_folder)
+
+        # Check to see if we need to actually load the trial log. If not, keep
+        # it simple and fast.
+        result = []
+        for c in columns:
+            # special hack for ordering
+            if c == 'ordering':
+                ordering = self._fh.erp_metadata[c].iloc[0]
+                if ordering == 'interleaved':
+                    l1, l2 = self._fh.erp_metadata['level'].iloc[:2]
+                    ordering = 'plateau' if l1 == l2 else 'ramp'
+                result.append(ordering)
+            elif c not in info:
+                data = self._fh.erp_metadata[c]
+                if verify_integrity and len(np.unique(data)) != 1:
+                    m = f'Column {c} has more than one unique value'
+                    raise ValueError(m)
+                result.append(data.iloc[0])
+            else:
+                result.append(info[c])
+
+        if flavor == 'tuple':
+            return tuple(result)
+        elif flavor == 'series':
+            return pd.Series(result, index=columns)
+        else:
+            raise ValueError(f'Unsupported flavor {flavor}')
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def analyzed_data(self):
+        return load_analysis(self._base_folder)
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def all_thresholds(self):
+        return self.analyzed_data[0]
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def thresholds(self):
+        return self.all_thresholds.groupby('frequency').mean()
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def all_waves(self):
+        return self.analyzed_data[1]
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def waves(self):
+        return self.all_waves.groupby(['frequency', 'level']).mean()
+
+    def get_epochs(self, *args, **kwargs):
+        return self._fh.get_epochs(*args, **kwargs)
+
+    def get_epochs_filtered(self, *args, **kwargs):
+        return self._fh.get_epochs_filtered(*args, **kwargs)
+
+    def get_random_segments(self, *args, **kwargs):
+        return self._fh.get_random_segments(*args, **kwargs)
+
+    def get_random_segments_filtered(self, *args, **kwargs):
+        return self._fh.get_random_segments_filtered(*args, **kwargs)
+
+    def _get_mean(self, fn, *args, **kwargs):
+        epochs = fn(*args, **kwargs)
+        reject_threshold, = self.get_info(['reject_threshold'])
+        m = np.abs(epochs) <= reject_threshold
+        m = m.all(axis=1)
+        return epochs.loc[m].groupby(['frequency', 'level', 'polarity']).mean() \
+            .groupby(['frequency', 'level']).mean()
+
+    def get_mean_epochs_filtered(self, *args, **kwargs):
+        return self._get_mean(self.get_epochs_filtered)
+
+    def get_mean_epochs(self, *args, **kwargs):
+        return self._get_mean(self.get_epochs)
 
 
 MERGE_PATTERN = \
@@ -32,238 +227,18 @@ MERGE_PATTERN = \
 ABR_ANALYZED_FILE_PATTERN = \
     r'ABR (?P<start>-?\d+\.\d+)ms ' + \
     r'to (?P<end>-?\d+\.\d+)ms ' + \
-    r'with (?P<filter_lb>\d+)Hz ' + \
+    r'(with (?P<filter_lb>\d+)Hz ' + \
     r'to (?P<filter_ub>\d+)Hz ' + \
-    r'filter average waveforms' + \
+    r'filter )?average waveforms' + \
     r'-(?P<frequency>\d+\.\d+)kHz-' + \
     r'((?P<analyzer>\w+)-)?' + \
     r'analyzed.txt'
 
 
 P_ABR_ANALYZED_FILE_PATTERN = re.compile(ABR_ANALYZED_FILE_PATTERN)
+#WAVEFORM_FILE = 'ABR -1.0ms to 9.0ms with 300Hz to 3000Hz filter average waveforms.csv'
 
-
-def fix_polarity_column(table):
-    col = table['target_tone_polarity']
-    if col.dtype != np.object:
-        return
-    tp = col[:].astype(np.int)
-    table.delcol('target_tone_polarity')
-    table.addcol(tp, 'target_tone_polarity')
-
-
-def fix_epoch_size(table):
-    if 'epoch_size' not in table.names:
-        data = np.full(len(table), 8.5e-3)
-        table.addcol(data, 'epoch_size')
-
-
-def expand_column_names(columns, base_name):
-    if base_name is not None:
-        columns = ['{}{}'.format(base_name, c) for c in columns]
-    return columns
-
-
-def make_query(trials, base_name='target_tone_'):
-    if base_name is not None:
-        trials = trials.copy()
-        trials = {'{}{}'.format(base_name, k): v for k, v in trials.items()}
-    queries = ['({} == {})'.format(k, v) for k, v in trials.items()]
-    return ' & '.join(queries)
-
-
-def format_columns(columns, base_name):
-    if columns is None:
-        columns = ['t0']
-        names = ['t0']
-    else:
-        names = columns + ['t0']
-        if base_name is not None:
-            columns = ['{}{}'.format(base_name, c) for c in columns]
-        columns = columns + ['t0']
-    return columns, names
-
-
-class ABRFile:
-
-    def __init__(self, base_folder, eeg_name='eeg'):
-        self._base_folder = base_folder
-        self._eeg_folder = os.path.join(base_folder, eeg_name)
-        self._erp_folder = os.path.join(base_folder, 'erp')
-        self._erp_md_folder = os.path.join(base_folder, 'erp_metadata')
-        self._eeg = bcolz.carray(rootdir=self._eeg_folder)
-        self._erp = bcolz.carray(rootdir=self._erp_folder)
-        self._erp_md = bcolz.ctable(rootdir=self._erp_md_folder)
-        self.trial_log = self._erp_md.todataframe()
-
-        # Run some fixers
-        fix_polarity_column(self._erp_md)
-        fix_epoch_size(self._erp_md)
-
-        epoch_size = self._erp_md['epoch_size'][:]
-        e_size = epoch_size * self._erp.attrs['fs']
-        e_size = np.round(e_size).astype('int64')
-        e_index = e_size.cumsum() - e_size[0]
-        self._e_index = e_index
-        self._e_size = e_size
-
-        t0 = self._erp_md['t0'][:]
-        c_index = t0 * self._eeg.attrs['fs']
-        c_index = np.round(c_index).astype('int64')
-        c_size = epoch_size * self._eeg.attrs['fs']
-        c_size = np.round(c_size).astype('int64')
-        self._c_index = c_index
-        self._c_size = c_size
-
-    def get_epochs(self, offset=0, duration=8.5e-3, padding_samples=0,
-                   detrend='linear', base_name='target_tone_', columns=None,
-                   **trials):
-
-        columns, names = format_columns(columns, base_name)
-        query = make_query(trials, base_name)
-        if query:
-            result_set = self._erp_md.where(query, outcols=columns)
-        else:
-            result_set = self._erp_md.iter(outcols=columns)
-
-        fs = self._eeg.attrs['fs']
-        duration_samples = round(duration*fs)
-
-        epochs = []
-        index = []
-        max_samples = self._eeg.shape[-1]
-
-        for i, row in enumerate(result_set):
-            t0 = row.t0
-            lb = round((row.t0+offset)*fs)
-            ub = lb + duration_samples
-            lb -= padding_samples
-            ub += padding_samples
-
-            if lb < 0 or ub > max_samples:
-                mesg = 'Data missing for epochs {} through {}'
-                mesg = mesg.format(i+1, len(self.trial_log))
-                print(mesg)
-                break
-
-            epoch = self._eeg[lb:ub]
-            epochs.append(epoch[np.newaxis])
-            index.append(row)
-
-        n_samples = len(epoch)
-        t = (np.arange(n_samples)-padding_samples)/self.fs + offset
-        epochs = np.concatenate(epochs, axis=0)
-
-        if detrend is not None:
-            epochs = signal.detrend(epochs, -1, detrend)
-
-        index = pd.MultiIndex.from_tuples(index, names=names)
-        df = pd.DataFrame(epochs, columns=t, index=index)
-        df.sort_index(inplace=True)
-        return df
-
-    def get_epochs_filtered(self, filter_lb=300, filter_ub=3000,
-                            filter_order=1, offset=-1e-3, duration=10e-3,
-                            detrend='linear', pad_duration=10e-3,
-                            base_name='target_tone_', columns=None, **trials):
-
-        Wn = (filter_lb/self.fs, filter_ub/self.fs)
-        b, a = signal.iirfilter(filter_order, Wn, btype='band', ftype='butter')
-        padding_samples = round(pad_duration*self.fs)
-        df = self.get_epochs(offset, duration, padding_samples, detrend,
-                             base_name, columns, **trials)
-
-        epochs_filtered = signal.filtfilt(b, a, df.values)
-        epochs_filtered = epochs_filtered[:, padding_samples:-padding_samples]
-        columns = df.columns[padding_samples:-padding_samples]
-        return pd.DataFrame(epochs_filtered, index=df.index, columns=columns)
-
-    def get_epoch_groups(self, *columns, base_name='target_tone_'):
-        groups = self.count_epochs(*columns, base_name=base_name)
-        results = []
-        keys = []
-        for index, _ in groups.iteritems():
-            trial_filter = {c: i for c, i in zip(columns, index)}
-            epochs = self.get_epochs(trial_filter)
-            keys.append(index)
-            results.append(epochs)
-        index = pd.MultiIndex.from_tuples(keys, names=columns)
-        return pd.Series(results, index=index, name='epochs')
-
-    def count_epochs(self, *columns, base_name='target_tone_'):
-        columns = expand_column_names(columns, base_name)
-        return self.trial_log.groupby(columns).size()
-
-    @property
-    def fs(self):
-        return self._eeg.attrs['fs']
-
-
-class ABRSupersetFile:
-
-    def __init__(self, *base_folders):
-        self._fh = [ABRFile(base_folder) for base_folder in base_folders]
-
-    def get_epochs(self, **kwargs):
-        epoch_superset = []
-        for fh in self._fh:
-            epochs = fh.get_epochs(**kwargs)
-            epoch_superset.append(epochs)
-        return np.concatenate(epoch_superset, axis=0)
-
-    def count_epochs(self, *columns):
-        counts = self._fh[0].count_epochs(*columns)
-        for fh in self._fh[1:]:
-            new_counts = fh.count_epochs(*columns)
-            counts = counts.add(new_counts, fill_value=0)
-        return counts
-
-    def get_epoch_groups(self, *columns):
-        groups = self.count_epochs(*columns)
-        results = []
-        keys = []
-        for index, _ in groups.iteritems():
-            kwargs = {c: i for c, i in zip(columns, index)}
-            epochs = self.get_epochs(**kwargs)
-            keys.append(index)
-            results.append(epochs)
-        index = pd.MultiIndex.from_tuples(keys, names=columns)
-        return pd.Series(results, index=index, name='epochs')
-
-    def get_average(self, **kwargs):
-        return self.get_epochs(**kwargs).mean(axis=0)
-
-    @classmethod
-    def from_pattern(cls, base_folder):
-        head, tail = os.path.split(base_folder)
-        glob_tail = FILE_RE.sub(MERGE_PATTERN, tail)
-        glob_pattern = os.path.join(head, glob_tail)
-        folders = glob(glob_pattern)
-        cls(*folders)
-
-    @classmethod
-    def from_folder(cls, base_folder):
-        folders = os.listdir(base_folder)
-        folders = [os.path.join(base_folder, f) for f in folders]
-        return cls(*folders)
-
-    @property
-    def fs(self):
-        fs = [fh.fs for fh in self._fh]
-        if len(set(fs)) != 1:
-            raise ValueError('Sampling rate of ABR sets differ')
-        return fs[0]
-
-
-def load(base_folder):
-    check = os.path.join(base_folder, 'erp')
-    if os.path.exists(check):
-        return ABRFile(base_folder)
-    else:
-        return ABRSupersetFile.from_folder(base_folder)
-
-
-def _load_analysis(filename, fix_missing_threshold=False):
+def load_abr_analysis(filename):
     rename = {
         'Level': 'level',
         '1msec Avg': 'baseline',
@@ -272,56 +247,75 @@ def _load_analysis(filename, fix_missing_threshold=False):
         'P1 Amplitude': 'p1_amplitude',
         'N1 Latency': 'n1_latency',
         'N1 Amplitude': 'n1_amplitude',
-        'Frequency': 'frequency',
-        'threshold': 'threshold',
+        'P2 Latency': 'p2_latency',
+        'P2 Amplitude': 'p2_amplitude',
+        'N2 Latency': 'n2_latency',
+        'N2 Amplitude': 'n2_amplitude',
+        'P3 Latency': 'p3_latency',
+        'P3 Amplitude': 'p3_amplitude',
+        'N3 Latency': 'n3_latency',
+        'N3 Amplitude': 'n3_amplitude',
+        'P4 Latency': 'p4_latency',
+        'P4 Amplitude': 'p4_amplitude',
+        'N4 Latency': 'n4_latency',
+        'N4 Amplitude': 'n4_amplitude',
+        'P5 Latency': 'p5_latency',
+        'P5 Amplitude': 'p5_amplitude',
+        'N5 Latency': 'n5_latency',
+        'N5 Amplitude': 'n5_amplitude',
     }
 
-    th_match = re.compile('Threshold \(dB SPL\): ([\w.]+)')
+    th_match = re.compile('Threshold \(dB SPL\): ([\w.-]+)')
     freq_match = re.compile('Frequency \(kHz\): ([\d.]+)')
     with open(filename) as fh:
-        text = fh.read()
-        th = ast.literal_eval(th_match.search(text).group(1))
-        freq = float(freq_match.search(text).group(1))
-        for i, l in enumerate(text.split('\n')):
-            if l.startswith('Level'):
+        for line in fh:
+            # Parse the threshold string
+            if line.startswith('Threshold'):
+                th_string = th_match.search(line).group(1)
+                if th_string == 'None':
+                    th = -np.inf
+                elif th_string == 'inf':
+                    th = np.inf
+                elif th_string == '-inf':
+                    th = -np.inf
+                else:
+                    th = float(th_string)
+
+            if line.startswith('Frequency'):
+                freq = float(freq_match.search(line).group(1))*1e3
+
+            if line.startswith('NOTE'):
                 break
 
+        data = pd.io.parsers.read_csv(fh, sep='\t')
+        data.rename(columns=rename, inplace=True)
+        #data['frequency'] = freq*1e3
+        #data['threshold'] = th
+
     base, head = os.path.split(filename)
-    analysis_info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
-    analysis_info['start'] = float(analysis_info['start'])*1e-3
-    analysis_info['end'] = float(analysis_info['end'])*1e-3
-    analysis_info['frequency'] = float(analysis_info['frequency'])*1e3
-    analysis_info['filter_lb'] = float(analysis_info['filter_lb'])
-    analysis_info['filter_ub'] = float(analysis_info['filter_ub'])
-    experiment_info = util.parse_filename(base)
+    info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
+    info['start'] = float(info['start'])*1e-3
+    info['end'] = float(info['end'])*1e-3
+    parse = lambda x: float(x) if x is not None else 0
+    info['filter_lb'] = parse(info['filter_lb'])
+    info['filter_ub'] = parse(info['filter_ub'])
+    del info['frequency']
 
-    data = pd.io.parsers.read_csv(filename, sep='\t', skiprows=i)
-    data.rename(columns=rename, inplace=True)
-    data['frequency'] = freq*1e3
-
-    data['threshold'] = th
-    if th is None and fix_missing_threshold:
-        data['threshold'] = data['level'].min()
-
-    data = data[list(rename.values())]
-    for k, v in analysis_info.items():
-        data[k] = v
-    for k, v in experiment_info.items():
-        data[k] = v
-    return data
+    m = data['level'] >= th
+    data = data.loc[m]
+    data = data[list(rename.values())] \
+        .set_index('level', verify_integrity=True) \
+        .sort_index()
+    return freq, th, info, data
 
 
-def load_analyzed_abr_data(abr_experiments, fix_missing_thresholds=False):
+def load_abr_analysis_for_experiments(abr_experiments, progressbar=True):
     abr_data = []
+    filenames = []
     for filename in abr_experiments['filename']:
         search_pattern = os.path.join(filename, '*-analyzed.txt')
-        peaks = []
-        try:
-            for analyzed_filename in glob(search_pattern):
-                p = _load_analysis(analyzed_filename, fix_missing_thresholds)
-                peaks.append(p)
-            peaks = pd.concat(peaks)
-            abr_data.append(peaks)
-        except:
-            print(f'Error processing {filename}')
-    return pd.concat(abr_data)
+        filenames.extend(glob(search_pattern))
+
+    iterator = tqdm(filenames) if progressbar else filenames
+    peaks = [load_abr_analysis(filename) for filename in iterator]
+    return pd.concat(peaks)
