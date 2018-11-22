@@ -73,22 +73,32 @@ class ABRDataset:
         experiments = [ABRExperiment(f) for f in folder.glob('*abr')]
         return cls(experiments)
 
-    def get_thresholds(self, columns, simplify=True, analyzer=None):
-        keys = self.get_info(columns, 'list')
+    def get_thresholds(self, concat_columns, simplify=True, analyzer=None):
+        keys = self.get_info(concat_columns, 'list')
         thresholds = [e.all_thresholds for e in self.experiments]
-        result = pd.concat(thresholds, keys=keys, names=columns)
-        return cleanup_analysis(result, columns, simplify, analyzer)
+        result = pd.concat(thresholds, keys=keys, names=concat_columns)
+        return cleanup_analysis(result, concat_columns, simplify, analyzer)
 
-    def get_waves(self, columns, simplify=True, analyzer=None):
-        keys = self.get_info(columns, 'list')
+    def get_waves(self, concat_columns, simplify=True, analyzer=None):
+        keys = self.get_info(concat_columns, 'list')
         waves = [e.all_waves for e in self.experiments]
-        result = pd.concat(waves, keys=keys, names=columns)
-        return cleanup_analysis(result, columns, simplify, analyzer)
+        result = pd.concat(waves, keys=keys, names=concat_columns)
+        return cleanup_analysis(result, concat_columns, simplify, analyzer)
 
-    def get_epochs(self, columns, **kwargs):
-        keys = self.get_info(columns, 'list')
+    def get_epochs(self, concat_columns, **kwargs):
+        keys = self.get_info(concat_columns, 'list')
         epochs = [e.get_mean_epochs(**kwargs) for e in self.experiments]
-        return pd.concat(epochs, keys=keys, names=columns)
+        return pd.concat(epochs, keys=keys, names=concat_columns)
+
+    def get_epochs_filtered(self, concat_columns, **kwargs):
+        keys = self.get_info(concat_columns, 'list')
+        epochs = [e.get_mean_epochs_filtered(**kwargs) for e in self.experiments]
+        return pd.concat(epochs, keys=keys, names=concat_columns)
+
+    def get_inear_calibrations(self, concat_columns):
+        keys = self.get_info(concat_columns, 'list')
+        calibrations = [e.inear_calibration for e in self.experiments]
+        return pd.concat(calibrations, keys=keys, names=concat_columns)
 
     def find_experiments(self, **kwargs):
         if 'date' in kwargs:
@@ -111,8 +121,11 @@ class ABRDataset:
         else:
             return experiments[0]
 
-    def get_info(self, columns, flavor='dataframe'):
+    def get_info(self, columns, flavor='dataframe', include_experiments=False):
         info = [e.get_info(columns) for e in self.experiments]
+        if include_experiments:
+            info = [list(i) + [e] for i, e in zip(info, self.experiments)]
+            columns = list(columns) + ['experiment']
         if flavor == 'dataframe':
             return pd.DataFrame(info, columns=columns)
         elif flavor == 'index':
@@ -188,6 +201,13 @@ class ABRExperiment:
     def waves(self):
         return self.all_waves.groupby(['frequency', 'level']).mean()
 
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def inear_calibration(self):
+        csv_file = self._fh.base_path / 'target_microphone_calibration.csv'
+        data = pd.read_csv(csv_file, index_col=0).set_index(['frequency'])
+        return data[['norm_spl']]
+
     def get_epochs(self, *args, **kwargs):
         return self._fh.get_epochs(*args, **kwargs)
 
@@ -209,10 +229,10 @@ class ABRExperiment:
             .groupby(['frequency', 'level']).mean()
 
     def get_mean_epochs_filtered(self, *args, **kwargs):
-        return self._get_mean(self.get_epochs_filtered)
+        return self._get_mean(self.get_epochs_filtered, *args, **kwargs)
 
     def get_mean_epochs(self, *args, **kwargs):
-        return self._get_mean(self.get_epochs)
+        return self._get_mean(self.get_epochs, *args, **kwargs)
 
 
 MERGE_PATTERN = \
@@ -289,8 +309,6 @@ def load_abr_analysis(filename):
 
         data = pd.io.parsers.read_csv(fh, sep='\t')
         data.rename(columns=rename, inplace=True)
-        #data['frequency'] = freq*1e3
-        #data['threshold'] = th
 
     base, head = os.path.split(filename)
     info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
@@ -303,7 +321,10 @@ def load_abr_analysis(filename):
 
     m = data['level'] >= th
     data = data.loc[m]
-    data = data[list(rename.values())] \
+
+    keep_cols = list(rename.values())
+    keep = [c for c in data.columns if c in keep_cols]
+    data = data[keep] \
         .set_index('level', verify_integrity=True) \
         .sort_index()
     return freq, th, info, data
