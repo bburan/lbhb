@@ -43,7 +43,7 @@ def select_balanced_targets(epochs, rng):
     return keep
 
 
-def split_est_val(recording, balance_phase=False):
+def get_est_val_times(recording, balance_phase=False):
     rng = np.random.RandomState(0)
 
     epochs = recording.epochs
@@ -66,6 +66,15 @@ def split_est_val(recording, balance_phase=False):
         val_times = epoch_union(val_times, target_times)
 
     return est_times, val_times
+
+
+def split_est_val(recording, balance_phase=False):
+    est_times, val_times = get_est_val_times(recording, balance_phase)
+    return {
+        'rand': select_times(recording, est_times, random_only=True, dual_only=True),
+        'est': select_times(recording, est_times, random_only=False, dual_only=True),
+        'val': select_times(recording, val_times, random_only=False, dual_only=True),
+    }
 
 
 def get_est_val_times_by_sequence(recording, rng):
@@ -111,6 +120,7 @@ def shuffle_streams(recording):
     recording['fg'] = s._modified_copy(fg)
     recording['bg'] = s._modified_copy(bg)
     return recording
+
 
 def select_times(recording, subset, random_only=True, dual_only=True):
     '''

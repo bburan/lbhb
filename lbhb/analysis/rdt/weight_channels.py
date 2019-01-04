@@ -1,7 +1,7 @@
 from nems.modules import weight_channels as wc
 
 
-def gaussian(rec, mean, sd, n_chan_in):
+def gaussian(rec, mean, sd, n_chan_in, **kwargs):
     coefficients = wc.gaussian_coefficients(mean, sd, n_chan_in)
     fn = lambda x: coefficients @ x
     return [
