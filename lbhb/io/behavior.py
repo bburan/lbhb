@@ -110,8 +110,8 @@ def load_sam_behavior(experiments, progressbar=True):
     #data = data.reset_index()
     data['date'] = data['datetime'].map(lambda x: x.date())
     data['yes'] = data['response'].map({'no response': False, 'poke': False, 'reward': True})
-    data['masker_level'] = pd.Categorical(data.masker_level, ordered=True)
-    data['depth'] = pd.Categorical(data['target_SAM_depth'], ordered=True)
+    #data['masker_level'] = pd.Categorical(data.masker_level, ordered=True)
+    data['depth'] = data['target_SAM_depth']
     n_depths = data.groupby(['animal', 'date'])['depth'] \
         .nunique().rename('n_depths')
     data = data.join(n_depths, on=['animal', 'date'])
