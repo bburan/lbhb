@@ -79,11 +79,33 @@ class ABRDataset:
         result = pd.concat(thresholds, keys=keys, names=concat_columns)
         return cleanup_analysis(result, concat_columns, simplify, analyzer)
 
-    def get_waves(self, concat_columns, simplify=True, analyzer=None):
+    def get_waves(self, concat_columns, simplify=True, analyzer=None,
+                  compute_metrics=False, multiplier=1):
         keys = self.get_info(concat_columns, 'list')
         waves = [e.all_waves for e in self.experiments]
         result = pd.concat(waves, keys=keys, names=concat_columns)
-        return cleanup_analysis(result, concat_columns, simplify, analyzer)
+        result = cleanup_analysis(result, concat_columns, simplify, analyzer)
+
+        cols = [c for c in result.columns if 'amplitude' in c]
+        cols.extend(['baseline', 'baseline_std'])
+        result[cols] *= multiplier
+
+        if not compute_metrics:
+            return result
+
+        cols = []
+        for w in range(1, 6):
+            if f'p{w}_amplitude' in result.columns:
+                expr = f'p{w}_amplitude-n{w}_amplitude'
+                result[f'w{w}_amplitude'] = result.eval(expr)
+                result[f'w{w}_latency'] = result[f'p{w}_latency']
+                cols.append(f'w{w}_amplitude')
+                cols.append(f'w{w}_latency')
+                expr = f'p{w}_amplitude-baseline'
+                result[f'w{w}_amplitude_re_baseline'] = result.eval(expr)
+                cols.append(f'w{w}_amplitude_re_baseline')
+
+        return result[cols]
 
     def get_epochs(self, concat_columns, **kwargs):
         keys = self.get_info(concat_columns, 'list')
@@ -194,7 +216,12 @@ class ABRExperiment:
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
     def all_waves(self):
-        return self.analyzed_data[1]
+        waves = self.analyzed_data[1].copy()
+        gain, = self.get_info(['amplifier_gain'])
+        cols = [c for c in waves.columns if 'amplitude' in c]
+        cols.extend(['baseline', 'baseline_std'])
+        waves[cols] /= gain
+        return waves
 
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
@@ -209,10 +236,12 @@ class ABRExperiment:
         return data[['norm_spl']]
 
     def get_epochs(self, *args, **kwargs):
-        return self._fh.get_epochs(*args, **kwargs)
+        gain, = self.get_info(['amplifier_gain'])
+        return self._fh.get_epochs(*args, **kwargs) / gain
 
     def get_epochs_filtered(self, *args, **kwargs):
-        return self._fh.get_epochs_filtered(*args, **kwargs)
+        gain, = self.get_info(['amplifier_gain'])
+        return self._fh.get_epochs_filtered(*args, **kwargs) / gain
 
     def get_random_segments(self, *args, **kwargs):
         return self._fh.get_random_segments(*args, **kwargs)
@@ -221,7 +250,8 @@ class ABRExperiment:
         return self._fh.get_random_segments_filtered(*args, **kwargs)
 
     def _get_mean(self, fn, *args, **kwargs):
-        epochs = fn(*args, **kwargs)
+        columns = ['frequency', 'level', 'polarity']
+        epochs = fn(*args, columns=columns, **kwargs)
         reject_threshold, = self.get_info(['reject_threshold'])
         m = np.abs(epochs) <= reject_threshold
         m = m.all(axis=1)
@@ -312,6 +342,8 @@ def load_abr_analysis(filename):
 
     base, head = os.path.split(filename)
     info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
+    if info['analyzer'] is None:
+        info['analyzer'] = ''
     info['start'] = float(info['start'])*1e-3
     info['end'] = float(info['end'])*1e-3
     parse = lambda x: float(x) if x is not None else 0
