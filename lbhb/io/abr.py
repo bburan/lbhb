@@ -28,12 +28,39 @@ from psi.data.io import abr
 MAXSIZE = 1024
 
 
-def load_analysis(base_folder):
+def load_n(base_folder):
+    n = []
+    keys = []
+    names = ['start', 'end', 'filter_lb', 'filter_ub']
+    for filename in base_folder.glob('*number of epochs.csv'):
+        n.append(pd.read_csv(filename))
+        match = P_N_EPOCHS_FILE_PATTERN.match(filename.name).groupdict()
+        match['start'] = float(match['start'])*1e-3
+        match['end'] = float(match['end'])*1e-3
+        parse = lambda x: float(x) if x is not None else 0
+        match['filter_lb'] = parse(match['filter_lb'])
+        match['filter_ub'] = parse(match['filter_ub'])
+        keys.append(tuple(match[k] for k in names))
+    result = pd.concat(n, keys=keys, names=names)
+    return result.set_index(['frequency', 'level'])['0'].rename('n')
+
+
+def load_analysis(base_folder, actual_frequencies=None):
     search_pattern = os.path.join(base_folder, '*-analyzed.txt')
     result = [load_abr_analysis(f) for f in glob(search_pattern)]
 
     names = ['analyzer', 'start', 'end', 'filter_lb', 'filter_ub', 'frequency']
     freq, th, info, data = zip(*result)
+
+    # Some versions of the ABR wave analysis program have a bug where the
+    # frequency is rounded to the nearest tenth place. Fix this by mapping back
+    # to the original frequencies in the file.
+    if actual_frequencies is not None:
+        actual_frequencies = np.array(list(actual_frequencies))
+        freq = np.array(freq)
+        d = freq[..., np.newaxis] - actual_frequencies
+        i = np.abs(d).argmin(axis=1)
+        freq = actual_frequencies[i]
 
     keys = []
     for f, i in zip(freq, info):
@@ -42,12 +69,12 @@ def load_analysis(base_folder):
 
     index = pd.MultiIndex.from_tuples(keys, names=names)
     threshold = pd.Series(th, index=index, name='threshold')
-    peaks = pd.concat(data, keys=keys, names=names)
+    peaks = pd.concat(data, keys=keys, names=names, sort=False)
     peaks.sort_index(inplace=True)
     return threshold, peaks
 
 
-def cleanup_analysis(result, info, simplify, analyzer):
+def cleanup_analysis(result, info, simplify, analyzer=None):
     if analyzer is not None:
         result = result.xs(analyzer, level='analyzer')
     if not simplify:
@@ -72,6 +99,12 @@ class ABRDataset:
         folder = Path(folder)
         experiments = [ABRExperiment(f) for f in folder.glob('*abr')]
         return cls(experiments)
+
+    def get_n(self, concat_columns, simplify=True):
+        keys = self.get_info(concat_columns, 'list')
+        n = [e.n for e in self.experiments]
+        result = pd.concat(n, keys=keys, names=concat_columns)
+        return cleanup_analysis(result, concat_columns, simplify)
 
     def get_thresholds(self, concat_columns, simplify=True, analyzer=None):
         keys = self.get_info(concat_columns, 'list')
@@ -99,8 +132,11 @@ class ABRDataset:
                 expr = f'p{w}_amplitude-n{w}_amplitude'
                 result[f'w{w}_amplitude'] = result.eval(expr)
                 result[f'w{w}_latency'] = result[f'p{w}_latency']
+                expr = f'p{w}_latency-n{w}_latency'
+                result[f'pn{w}_latency'] = result.eval(expr)
                 cols.append(f'w{w}_amplitude')
                 cols.append(f'w{w}_latency')
+                cols.append(f'pn{w}_latency')
                 expr = f'p{w}_amplitude-baseline'
                 result[f'w{w}_amplitude_re_baseline'] = result.eval(expr)
                 cols.append(f'w{w}_amplitude_re_baseline')
@@ -162,11 +198,25 @@ class ABRDataset:
         return iter(self.experiments)
 
 
+def clear_cache():
+    for method_name in dir(ABRExperiment):
+        method = getattr(ABRExperiment, method_name)
+        if isinstance(method, property):
+            method = method.fget
+        if hasattr(method, 'cache_clear'):
+            method.cache_clear()
+
+
 class ABRExperiment:
 
     def __init__(self, base_folder):
         self._base_folder = base_folder
         self._fh = abr.load(base_folder)
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
+    def n(self):
+        return load_n(self._base_folder)
 
     def get_info(self, columns, verify_integrity=False, flavor='tuple'):
         info = util.parse_filename(self._base_folder)
@@ -200,13 +250,25 @@ class ABRExperiment:
 
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
+    def frequencies(self):
+        return {*self._fh.erp_metadata['frequency']}
+
+    @property
+    @functools.lru_cache(maxsize=MAXSIZE)
     def analyzed_data(self):
-        return load_analysis(self._base_folder)
+        return load_analysis(self._base_folder, self.frequencies)
 
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
     def all_thresholds(self):
-        return self.analyzed_data[0]
+        # Need to make sure that *all* frequencies are represented. This helps
+        # us catch data for which we do not have the full set analyzed.
+        thresholds = self.analyzed_data[0] \
+            .unstack('frequency') \
+            .reindex(self.frequencies, axis='columns') \
+            .stack(dropna=False) \
+            .rename('threshold')
+        return thresholds.sort_index()
 
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
@@ -216,7 +278,18 @@ class ABRExperiment:
     @property
     @functools.lru_cache(maxsize=MAXSIZE)
     def all_waves(self):
+        # Need to make sure that *all* frequencies are represented. This helps
+        # us catch data for which we do not have the full set analyzed.
         waves = self.analyzed_data[1].copy()
+        waves.columns = waves.columns.rename('measure')
+        waves = waves.stack() \
+            .unstack('frequency') \
+            .reindex(self.frequencies, axis='columns') \
+            .stack(dropna=False) \
+            .unstack('measure')
+        waves.index = waves.index.swaplevel('level', 'frequency')
+        waves = waves.sort_index()
+
         gain, = self.get_info(['amplifier_gain'])
         cols = [c for c in waves.columns if 'amplitude' in c]
         cols.extend(['baseline', 'baseline_std'])
@@ -274,21 +347,29 @@ MERGE_PATTERN = \
     r'\g<experiment>*'
 
 
-ABR_ANALYZED_FILE_PATTERN = \
+PROCESSED_FILE_PATTERN_BASE = \
     r'ABR (?P<start>-?\d+\.\d+)ms ' + \
     r'to (?P<end>-?\d+\.\d+)ms ' + \
     r'(with (?P<filter_lb>\d+)Hz ' + \
-    r'to (?P<filter_ub>\d+)Hz ' + \
-    r'filter )?average waveforms' + \
+    r'to (?P<filter_ub>\d+)Hz filter )?' \
+    r'(?P<suffix>[\w\s]+)?'
+
+N_EPOCHS_FILE_PATTERN = PROCESSED_FILE_PATTERN_BASE + \
+    'number of epochs.csv'
+
+
+ABR_ANALYZED_FILE_PATTERN = PROCESSED_FILE_PATTERN_BASE + \
+    r'average waveforms' + \
     r'-(?P<frequency>\d+\.\d+)kHz-' + \
     r'((?P<analyzer>\w+)-)?' + \
     r'analyzed.txt'
 
 
 P_ABR_ANALYZED_FILE_PATTERN = re.compile(ABR_ANALYZED_FILE_PATTERN)
-#WAVEFORM_FILE = 'ABR -1.0ms to 9.0ms with 300Hz to 3000Hz filter average waveforms.csv'
+P_N_EPOCHS_FILE_PATTERN = re.compile(N_EPOCHS_FILE_PATTERN)
 
-def load_abr_analysis(filename):
+
+def load_abr_analysis(filename, parse_filename=True):
     rename = {
         'Level': 'level',
         '1msec Avg': 'baseline',
@@ -340,16 +421,19 @@ def load_abr_analysis(filename):
         data = pd.io.parsers.read_csv(fh, sep='\t')
         data.rename(columns=rename, inplace=True)
 
-    base, head = os.path.split(filename)
-    info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
-    if info['analyzer'] is None:
-        info['analyzer'] = ''
-    info['start'] = float(info['start'])*1e-3
-    info['end'] = float(info['end'])*1e-3
-    parse = lambda x: float(x) if x is not None else 0
-    info['filter_lb'] = parse(info['filter_lb'])
-    info['filter_ub'] = parse(info['filter_ub'])
-    del info['frequency']
+    if parse_filename:
+        base, head = os.path.split(filename)
+        info = P_ABR_ANALYZED_FILE_PATTERN.match(head).groupdict()
+        if info['analyzer'] is None:
+            info['analyzer'] = ''
+        info['start'] = float(info['start'])*1e-3
+        info['end'] = float(info['end'])*1e-3
+        parse = lambda x: float(x) if x is not None else 0
+        info['filter_lb'] = parse(info['filter_lb'])
+        info['filter_ub'] = parse(info['filter_ub'])
+        del info['frequency']
+    else:
+        info = None
 
     m = data['level'] >= th
     data = data.loc[m]
