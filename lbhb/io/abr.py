@@ -143,6 +143,11 @@ class ABRDataset:
 
         return result[cols]
 
+    def get_epochs_processed(self, concat_columns, **kwargs):
+        keys = self.get_info(concat_columns, 'list')
+        epochs = [e.get_average_epochs_processed(**kwargs) for e in self.experiments]
+        return pd.concat(epochs, keys=keys, names=concat_columns)
+
     def get_epochs(self, concat_columns, **kwargs):
         keys = self.get_info(concat_columns, 'list')
         epochs = [e.get_mean_epochs(**kwargs) for e in self.experiments]
@@ -307,6 +312,22 @@ class ABRExperiment:
         csv_file = self._fh.base_path / 'target_microphone_calibration.csv'
         data = pd.read_csv(csv_file, index_col=0).set_index(['frequency'])
         return data[['norm_spl']]
+
+    def get_average_epochs_processed(self, matched=True):
+        '''
+        Returns epochs as processed for ABR analysis
+        '''
+        choices = self._fh.base_path.glob('*average waveforms.csv')
+        if matched:
+            choices = [c for c in choices if 'matched' in str(c)]
+        else:
+            choices = [c for c in choices if 'matched' not in str(c)]
+        if len(choices) != 1:
+            raise ValueError('Cannot choose from options')
+        data = pd.read_csv(choices[0], header=[0, 1], index_col=0).T
+        levels = [l.astype('f') for l in data.index.levels]
+        data.index = data.index.set_levels(levels)
+        return data
 
     def get_epochs(self, *args, **kwargs):
         gain, = self.get_info(['amplifier_gain'])
