@@ -215,7 +215,7 @@ def clear_cache():
 class ABRExperiment:
 
     def __init__(self, base_folder):
-        self._base_folder = base_folder
+        self._base_folder = Path(base_folder)
         self._fh = abr.load(base_folder)
 
     @property
@@ -329,13 +329,26 @@ class ABRExperiment:
         data.index = data.index.set_levels(levels)
         return data
 
-    def get_epochs(self, *args, **kwargs):
-        gain, = self.get_info(['amplifier_gain'])
-        return self._fh.get_epochs(*args, **kwargs) / gain
+    def _get_epochs(self, fn, apply_reject, limit_averages, *args, **kwargs):
+        info = ['amplifier_gain', 'reject_threshold', 'averages']
+        gain, reject, averages = self.get_info(info)
+        epochs = fn(*args, **kwargs)
+        if apply_reject:
+            mask = (epochs <= reject).all(axis=1)
+            epochs = epochs.loc[mask]
+        if limit_averages:
+            raise NotImplementedError
+        return epochs / gain
 
-    def get_epochs_filtered(self, *args, **kwargs):
-        gain, = self.get_info(['amplifier_gain'])
-        return self._fh.get_epochs_filtered(*args, **kwargs) / gain
+    def get_epochs(self, apply_reject=True, limit_averages=True, **kwargs):
+        return self._get_epochs(self._fh.get_epochs, apply_reject=apply_reject,
+                                limit_averages=limit_averages, **kwargs)
+
+    def get_epochs_filtered(self, apply_reject=True, limit_averages=True,
+                            **kwargs):
+        return self._get_epochs(self._fh.get_epochs_filtered,
+                                apply_reject=apply_reject,
+                                limit_averages=limit_averages, **kwargs)
 
     def get_random_segments(self, *args, **kwargs):
         return self._fh.get_random_segments(*args, **kwargs)
