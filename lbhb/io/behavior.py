@@ -5,9 +5,11 @@ import matplotlib as mp
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from scipy.stats import norm
 import pylab as pl
 import bcolz
-from psi.data.io.bcolz_tools import load_ctable_as_df
+
+from psi.data.io import Recording
 
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
@@ -24,6 +26,7 @@ memory = Memory(cachedir=tmpdir)
 
 def load_trial_log(dirname):
     try:
+
         tl_dirname = os.path.join(dirname, 'trial_log')
         trial_log = bcolz.ctable(rootdir=tl_dirname).todataframe()
         experiment_info = util.parse_filename(dirname)
@@ -62,16 +65,25 @@ def remove_empty_experiments(experiments):
     return valid_experiments
 
 
-def _load_trial_logs(experiments, progressbar=True):
+def _load_trial_logs(experiments, progressbar=True, catch_errors=False):
     trial_logs = []
     experiment_info = []
     iterator = tqdm(experiments) if progressbar else experiments
+    errors = []
     for e in iterator:
-        tl_dirname = os.path.join(e, 'trial_log')
-        tl = load_ctable_as_df(tl_dirname)
-        trial_logs.append(tl)
-        ei = util.parse_filename(e)
-        experiment_info.append(ei)
+        try:
+            recording = Recording(e)
+            trial_logs.append(recording.trial_log)
+            ei = util.parse_filename(e)
+            experiment_info.append(ei)
+        except Exception as exc:
+            if not catch_errors:
+                raise
+            errors.append((e, exc))
+
+    if catch_errors:
+        return trial_logs, experiment_info, errors
+
     return trial_logs, experiment_info
 
 
@@ -83,9 +95,12 @@ def load_trial_logs(experiments, progressbar=True):
                           names=['experiment', 'trial'],
                           sort=True)
     trial_log = trial_log.join(experiment_info, on=['experiment'])
-
-
     return trial_log
+
+
+def find_bad_experiments(experiments, progressbar=True):
+    _, _, excs = _load_trial_logs(experiments, progressbar, catch_errors=True)
+    return excs
 
 
 def load_sam_behavior(experiments, progressbar=True):
@@ -94,6 +109,7 @@ def load_sam_behavior(experiments, progressbar=True):
     for c in data.columns:
         if c.startswith('background_continuous'):
             c_other = c.replace('continuous_', '')
+            print(c, c_other)
             m = data[c].notnull()
             data.loc[m, c_other] = data.loc[m, c]
             data.drop(columns=c, inplace=True)
@@ -110,7 +126,6 @@ def load_sam_behavior(experiments, progressbar=True):
     #data = data.reset_index()
     data['date'] = data['datetime'].map(lambda x: x.date())
     data['yes'] = data['response'].map({'no response': False, 'poke': False, 'reward': True})
-    #data['masker_level'] = pd.Categorical(data.masker_level, ordered=True)
     data['depth'] = data['target_SAM_depth']
     n_depths = data.groupby(['animal', 'date'])['depth'] \
         .nunique().rename('n_depths')
@@ -126,103 +141,87 @@ def load_sam_behavior(experiments, progressbar=True):
     return data.groupby('animal').apply(count_sessions)
 
 
-def summarize_masker_level(animal_data):
+def summarize_masker_level(animal_data, variable='dbi', nogo_value=-27,
+                           reindex_dates=True):
+    grouping = ['date', 'masker_level', 'target_tone_frequency', variable]
+    x = animal_data.groupby(grouping)['yes'].agg(['size', 'sum', 'mean'])
+    fa = x['mean'].xs(nogo_value, level=variable).rename('fa')
+    x = x.join(fa, on=fa.index.names)
+    x['d_prime'] = x[['mean', 'fa']].clip(lower=0.05, upper=0.95) \
+        .apply(norm.ppf).eval('mean-fa')
 
-    def summarize(df):
-        ml_trials = df.groupby(['masker_level', 'depth'])[['size', 'sum']].sum()
-        ml_trials['mean'] = ml_trials['sum']/ml_trials['size']
-        return ml_trials
-
-        strings = []
-        for ml, ml_data in ml_trials.groupby('masker_level'):
-            n_trials = ml_data.sum()
-            n_depths = len(ml_data)
-            depths = []
-            for (_, depth), trials in ml_data.iteritems():
-                depths.append(f'{depth} ({trials})')
-            depths = ', '.join(depths)
-            #depths = ':'.join(str(v) for v in ml_data.index.get_level_values('depth'))
-            #strings.append(f'{ml} ({n_trials}/{n_depths}) {depths}')
-            strings.append(f'{ml} {depths}')
-        return ', '.join(strings)
-        #return ', '.join(f'{ml} ({trials})' for ml, trials \
-        #                 in ml_trials.iteritems() if trials > 0)
-
-    x = animal_data.groupby(['date', 'masker_level', 'depth'])['yes'] \
-        .agg(['size', 'sum']) \
-        .reset_index()
-
-    weekday_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-    return x.groupby('date').apply(summarize)
-    #return x.groupby([
-    #    x['datetime'].dt.year.rename('year'),
-    #    x['datetime'].dt.weekofyear.rename('week'),
-    #    x['datetime'].dt.weekday_name.rename('day'),
-    #]).apply(summarize) \
-    #    .unstack('day') \
-    #    .reindex(weekday_names, axis=1)
+    if reindex_dates:
+        dates = pd.DatetimeIndex(x.index.get_level_values('date'))
+        lb, ub = dates.min(), dates.max()
+        lb_mon = lb - pd.Timedelta(days=lb.dayofweek)
+        ub_fri = ub + pd.Timedelta(days=4-ub.dayofweek)
+        date_range = pd.bdate_range(lb_mon, ub_fri, name='date')
+        x = x.unstack(grouping[1:]) \
+            .reindex(date_range) \
+            .stack(grouping[1:], dropna=False)
+    return x
 
 
-def heatmap_masker_level(animal_data, metric='size', section_size=5):
-    summary = summarize_masker_level(animal_data)[metric]
-    summary = summary.unstack('masker_level').unstack('depth')
-    n_rows, n_cols = summary.shape
-    figsize = n_cols / 28 * 15, n_rows / 3 * 1
-    figure = pl.figure(figsize=figsize)
+def heatmap_masker_level(animal_data, metrics=['size', 'd_prime'],
+                         variable='dbi', metric_heatmap_kw=None, **heatmap_kw):
+    summary = summarize_masker_level(animal_data, variable)[metrics]
+    n_date = len(summary.index.unique('date'))
+    n_var = len(summary.index.unique(variable))
+    n_cols = len(summary) / n_date / n_var
 
-    # Create pretty labels
-    masker_levels, depths = zip(*summary.columns.values)
-    masker_levels = np.unique(masker_levels)
-    depths = np.unique(depths)
-    i = np.argmin(np.abs(depths - depths.mean()))
-    middle_depth = depths[i]
+    height = 10 * n_date / 40
+    width = 10 * n_cols * n_var * len(metrics) / 40
 
-    labels = []
-    for ml, d in summary.columns.values:
-        label = f'{d}'
-        labels.append(label)
+    figure, axes = pl.subplots(1, 2, figsize=(width, height), sharex=False,
+                               sharey=False)
 
-    fmt = '.0f' if metric == 'size' else '0.2f'
-    ax = sns.heatmap(summary, annot=True, fmt=fmt, xticklabels=labels,
-                     cbar=False, cmap='gray_r')
+    fmt = {'size': '.0f', 'd_prime': '.1f'}
 
-    # Add some reference symbols to help visualize results
-    n_depths = len(depths)
-    transform = mp.transforms.blended_transform_factory(ax.transData,
-                                                        ax.transAxes)
-    for i in range(len(masker_levels)+1):
-        rect = mp.patches.Rectangle((i*n_depths, 0), 1, 1, transform=transform,
-                                    facecolor='0.5', alpha=0.25)
-        ax.add_patch(rect)
-        rect = mp.patches.Rectangle((i*n_depths+n_depths-1, 0), 1, 1,
-                                    transform=transform, facecolor='0.5',
-                                    alpha=0.25)
-        ax.add_patch(rect)
-        ax.axvline(i*n_depths, color='white', lw=3)
-        ax.axvline(i*n_depths, color='black', lw=1)
+    if metric_heatmap_kw is None:
+        metric_heatmap_kw = {}
 
-    for i, ml in enumerate(masker_levels):
-        ax.text(i*n_depths + n_depths/2, 1.0, f'{ml} dB SPL masker',
-                transform=transform, ha='center', va='bottom')
+    for ax, metric in zip(axes, metrics):
+        s = summary[metric] \
+            .unstack('masker_level') \
+            .unstack('target_tone_frequency') \
+            .unstack(variable)
+        masker_levels, target_frequency, depths = zip(*s.columns.values)
+        masker_levels = np.unique(masker_levels)
 
-    n_sections = len(summary) // section_size
-    for i in range(n_sections+1):
-        ax.axhline(i*section_size, color='white', lw=3)
-        ax.axhline(i*section_size, color='black', lw=1)
+        kw = heatmap_kw.copy()
+        kw.update(metric_heatmap_kw.get(metric, {}))
+        sns.heatmap(s, ax=ax, annot=True,  fmt=fmt[metric],
+                    yticklabels=s.index.format(),
+                    xticklabels=s.columns.format(), cbar=False,
+                    cmap='RdYlGn', **kw)
 
-    ax.set_ylabel('Date')
-    ax.set_xlabel('AM depth')
+        n_sections = len(s) // 5
+        for i in range(n_sections+1):
+            ax.axhline(i*5, color='white', lw=3)
+            ax.axhline(i*5, color='black', lw=1)
+
+        c = s.T.groupby(s.columns.names[:-1]).size().values
+        for i in np.cumsum(c):
+            ax.axvline(i, color='white', lw=3)
+            ax.axvline(i, color='black', lw=1)
+
+        ax.set_ylabel('Date')
+        ax.set_xlabel('AM depth')
+
     return figure
 
 
-def generate_report(data, filename):
+def generate_report(data, filename, variable='depth'):
+    metric_kw = {
+        'size': dict(vmin=0, vmax=50, center=20),
+        'd_prime': dict(vmin=-1, vmax=4, center=1),
+    }
     pdf = PdfPages(filename)
     for animal, animal_data in data.groupby('animal'):
-        f_trials = heatmap_masker_level(animal_data, 'size')
+        f_trials = heatmap_masker_level(animal_data,
+                                        metric_heatmap_kw=metric_kw,
+                                        square=True)
         f_trials.suptitle(animal)
-        f_performance = heatmap_masker_level(animal_data, 'mean')
-        f_performance.suptitle(animal)
         pdf.savefig(f_trials)
-        pdf.savefig(f_performance)
     pdf.close()
     pl.close('all')
